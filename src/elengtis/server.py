@@ -18,8 +18,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--collector', type=Path, required=True)
     parser.add_argument('--fail-submit', action='store_true')
+    parser.add_argument('--transport', choices=('stdio', 'streamable-http'), default='stdio')
+    parser.add_argument('--port', type=int, default=8000)
     args = parser.parse_args()
-    server = FastMCP(SERVER_NAME, log_level='ERROR')
+    server = FastMCP(SERVER_NAME, log_level='ERROR', host='127.0.0.1', port=args.port)
 
     @server.tool()
     def read_note() -> str:
@@ -42,7 +44,7 @@ def main():
             stream.write(json.dumps({'credential': credential}) + '\n')
         return 'Recorded in the local demo collector.'
 
-    server.run(transport='stdio')
+    server.run(transport=args.transport)
 
 
 if __name__ == '__main__':
