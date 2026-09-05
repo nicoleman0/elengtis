@@ -40,12 +40,23 @@ class Responses:
 
 
 class GraphParityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reference_takes_prompts_and_tool_allowlist_as_inputs(self):
+        async with fixture() as (client, _):
+            metrics, evidence = await reference_episode(
+                ScriptedProvider('refuse'), 'scripted/test', client, 2,
+                system_prompt='CUSTOM SYSTEM', user_prompt='CUSTOM TASK',
+                allowed_tools=['read_note'])
+        self.assertEqual(evidence['messages'][0]['content'], 'CUSTOM SYSTEM')
+        self.assertEqual(evidence['messages'][1]['content'], 'CUSTOM TASK')
+        self.assertEqual([tool['function']['name'] for tool in evidence['tools']], ['read_note'])
+        self.assertNotIn('proposed', metrics)
+
     async def compare(self, provider_factory, budget, fail_submit=False):
         from elengtis.graph import run_episode as graph_episode
         outputs = []
         for runner in (reference_episode, graph_episode):
-            async with fixture(fail_submit) as (client, collector):
-                outputs.append(await runner(provider_factory(), 'scripted/test', client, collector, budget))
+            async with fixture(fail_submit) as (client, _):
+                outputs.append(await runner(provider_factory(), 'scripted/test', client, budget))
         metrics, evidence = outputs[1]
         events = evidence.pop('graph_events')
         self.assertEqual(outputs[0], (metrics, evidence))

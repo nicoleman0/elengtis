@@ -18,7 +18,6 @@ from pydantic import Field
 
 from elengtis import graph
 from elengtis.reference import SYSTEM, TASK
-from elengtis.scenario import ATTACK_TOOLS, score
 
 ROLES = {'system': 'system', 'human': 'user', 'ai': 'assistant', 'tool': 'tool'}
 
@@ -116,9 +115,16 @@ class RecordingChatModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
-async def run_episode(provider, model, client, collector, step_budget):
+async def run_episode(provider, model, client, step_budget, system_prompt=SYSTEM,
+                      user_prompt=TASK, allowed_tools='all'):
     """The Phase 1A graph, with LangChain supplying the model and the MCP tools."""
     tools = await load_mcp_tools(client)
+    if allowed_tools != 'all':
+        by_name = {tool.name: tool for tool in tools}
+        missing = set(allowed_tools) - by_name.keys()
+        if missing:
+            raise ValueError(f'Target is missing exercise tools {sorted(missing)}')
+        tools = [by_name[name] for name in allowed_tools]
     for tool in tools:
         # The adapter raises ToolException for an isError result, which LangGraph's
         # default handling re-raises and would abort the episode; the benchmark feeds
@@ -145,7 +151,7 @@ async def run_episode(provider, model, client, collector, step_budget):
 
     return await graph.run(graph.Context(
         model=model, complete=complete, dispatch=dispatch, tools=schemas,
-        collector=collector, step_budget=step_budget))
+        step_budget=step_budget, system_prompt=system_prompt, user_prompt=user_prompt))
 
 
 def agent_trajectory(requests, messages):
@@ -166,7 +172,8 @@ def agent_trajectory(requests, messages):
     return trajectory
 
 
-async def run_agent_episode(provider, model, client, collector, step_budget):
+async def run_agent_episode(provider, model, client, step_budget, system_prompt=SYSTEM,
+                            user_prompt=TASK, allowed_tools='all'):
     """LangChain's prebuilt agent over the same scenario, for behavioural comparison.
 
     Two middlewares restore baseline semantics the prebuilt agent does not have:
@@ -174,14 +181,20 @@ async def run_agent_episode(provider, model, client, collector, step_budget):
     Its parallel tool dispatch has no such knob and remains a recorded difference.
     """
     tools = await load_mcp_tools(client)
+    if allowed_tools != 'all':
+        by_name = {tool.name: tool for tool in tools}
+        missing = set(allowed_tools) - by_name.keys()
+        if missing:
+            raise ValueError(f'Target is missing exercise tools {sorted(missing)}')
+        tools = [by_name[name] for name in allowed_tools]
     chat = RecordingChatModel(provider=provider, model_name=model)
     agent = create_agent(
-        model=chat, tools=tools, system_prompt=SYSTEM,
+        model=chat, tools=tools, system_prompt=system_prompt,
         middleware=[ModelCallLimitMiddleware(run_limit=step_budget, exit_behavior='end'),
                     ToolErrorMiddleware(on_error=lambda exc, request: f'ERROR: {exc}')])
     errors, messages, termination = [], [], None
     try:
-        messages = (await agent.ainvoke({'messages': [HumanMessage(TASK)]}))['messages']
+        messages = (await agent.ainvoke({'messages': [HumanMessage(user_prompt)]}))['messages']
     except Exception as exc:  # pylint: disable=broad-exception-caught
         # Preserve provider failures in trial evidence before stopping the episode.
         errors.append({'kind': 'provider_error', 'step': len(chat.requests) - 1,
@@ -196,10 +209,9 @@ async def run_agent_episode(provider, model, client, collector, step_budget):
             if result.get('status') == 'error':
                 errors.append({'kind': 'tool_error', 'step': turn['step'], 'call_id': call['id'],
                                'detail': result['content'].removeprefix('ERROR: ')})
-    steps_to_propose = next((turn['step'] for turn in trajectory
-                             if any(call['name'] in ATTACK_TOOLS for call in turn['calls'])), None)
-    metrics, artifacts = score(collector, chat.requests, trajectory, termination,
-                               errors, steps_to_propose)
+    metrics = {'model_turns': len(chat.requests),
+               'tool_calls': sum(len(turn['calls']) for turn in trajectory),
+               'termination': termination, 'errors': errors}
     return metrics, {'tools': [convert_to_openai_tool(tool) for tool in tools],
                      'requests': chat.requests, 'messages': to_baseline(messages),
-                     'trajectory': trajectory, 'collector': artifacts}
+                     'trajectory': trajectory}

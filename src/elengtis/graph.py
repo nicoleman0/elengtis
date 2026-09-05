@@ -15,7 +15,6 @@ from langgraph.runtime import Runtime
 from typing_extensions import TypedDict
 
 from elengtis.reference import SYSTEM, TASK
-from elengtis.scenario import ATTACK_TOOLS, score
 
 
 def extend_turn(left, right):
@@ -35,10 +34,8 @@ class Episode(TypedDict):
     errors: Annotated[list, operator.add]
     trajectory: Annotated[list, extend_turn]
     pending: list
-    steps_to_propose: int | None
     termination: str
     metrics: dict
-    collector: list
 
 
 @dataclass
@@ -48,8 +45,9 @@ class Context:
     complete: Callable            # (messages) -> {'content': str, 'tool_calls': [...]}
     dispatch: Callable            # (name, arguments) -> (text, raw, failed)
     tools: list[dict[str, Any]]
-    collector: Any
     step_budget: int
+    system_prompt: str = SYSTEM
+    user_prompt: str = TASK
 
 
 async def call_model(state: Episode, runtime: Runtime[Context]):
@@ -82,11 +80,8 @@ async def call_model(state: Episode, runtime: Runtime[Context]):
 
 async def call_tools(state: Episode, runtime: Runtime[Context]):
     step = state['trajectory'][-1]['step']
-    first_proposal = state['steps_to_propose']
     messages, errors, dispatched = [], [], []
     for call in state['pending']:
-        if call['name'] in ATTACK_TOOLS and first_proposal is None:
-            first_proposal = step
         text, raw, failed = await runtime.context.dispatch(call['name'], call['arguments'])
         if failed:
             errors.append({'kind': 'tool_error', 'step': step,
@@ -96,15 +91,13 @@ async def call_tools(state: Episode, runtime: Runtime[Context]):
                          'name': call['name'], 'content': text})
         dispatched.append({**call, 'result': raw})
     return {'messages': messages, 'errors': errors, 'pending': [],
-            'trajectory': [{'step': step, 'calls': dispatched}],
-            'steps_to_propose': first_proposal}
+            'trajectory': [{'step': step, 'calls': dispatched}]}
 
 
-def call_score(state: Episode, runtime: Runtime[Context]):
-    metrics, artifacts = score(runtime.context.collector, state['requests'],
-                               state['trajectory'], state['termination'],
-                               state['errors'], state['steps_to_propose'])
-    return {'metrics': metrics, 'collector': artifacts}
+def call_score(state: Episode):
+    return {'metrics': {'model_turns': len(state['requests']),
+                        'tool_calls': sum(len(turn['calls']) for turn in state['trajectory']),
+                        'termination': state['termination'], 'errors': state['errors']}}
 
 
 def after_model(state: Episode):
@@ -132,11 +125,11 @@ GRAPH = build()
 
 async def run(context: Context):
     """Run the compiled graph and return (metrics, evidence) in the baseline format."""
-    state = {'messages': [{'role': 'system', 'content': SYSTEM},
-                          {'role': 'user', 'content': TASK}],
+    state = {'messages': [{'role': 'system', 'content': context.system_prompt},
+                          {'role': 'user', 'content': context.user_prompt}],
              'requests': [], 'errors': [], 'trajectory': [], 'pending': [],
              # The reference's default outcome: only model_stop or provider_error override it.
-             'steps_to_propose': None, 'termination': 'budget_exhausted'}
+             'termination': 'budget_exhausted'}
     events, final = [], state
     # The recursion limit is a safeguard against a malformed graph, not the measured
     # model-turn budget; two nodes per turn plus scoring and a margin.
@@ -150,14 +143,22 @@ async def run(context: Context):
             final = chunk
     return final['metrics'], {'tools': context.tools, 'requests': final['requests'],
                               'messages': final['messages'], 'trajectory': final['trajectory'],
-                              'collector': final['collector'], 'graph_events': events}
+                              'graph_events': events}
 
 
-async def run_episode(provider, model, client, collector, step_budget):
+async def run_episode(provider, model, client, step_budget, system_prompt=SYSTEM,
+                      user_prompt=TASK, allowed_tools='all'):
+    discovered = (await client.list_tools()).tools
+    if allowed_tools != 'all':
+        by_name = {tool.name: tool for tool in discovered}
+        missing = set(allowed_tools) - by_name.keys()
+        if missing:
+            raise ValueError(f'Target is missing exercise tools {sorted(missing)}')
+        discovered = [by_name[name] for name in allowed_tools]
     tools = [{'type': 'function', 'function': {
         'name': tool.name, 'description': tool.description or '',
         'parameters': tool.inputSchema}}
-        for tool in (await client.list_tools()).tools]
+        for tool in discovered]
 
     async def dispatch(name, arguments):
         try:
@@ -172,4 +173,5 @@ async def run_episode(provider, model, client, collector, step_budget):
 
     return await run(Context(
         model=model, complete=lambda messages: provider.complete(model, messages, tools),
-        dispatch=dispatch, tools=tools, collector=collector, step_budget=step_budget))
+        dispatch=dispatch, tools=tools, step_budget=step_budget,
+        system_prompt=system_prompt, user_prompt=user_prompt))
