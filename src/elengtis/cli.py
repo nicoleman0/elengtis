@@ -1,275 +1,190 @@
-"""Run a bounded synthetic matrix; every trial has a fresh fixture process."""
-import argparse
-import asyncio
+"""Validate and run declarative MCP auditing campaigns."""
+import argparse, asyncio, hashlib, json, platform, subprocess, tempfile, traceback, uuid
 from collections import Counter
-from datetime import datetime, timezone, timedelta
-import hashlib
+from datetime import datetime, timezone
 from importlib import import_module
 from importlib.metadata import version
-import json
 from pathlib import Path
-import platform
-import subprocess
-import sys
-import tempfile
-import traceback
-import uuid
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from elengtis.config import Campaign, CampaignBundle, Scenario, load_campaign, plan_trials, write_schemas
+from elengtis.reference import ScriptedProvider
+from elengtis.scenario import evaluate_proposals, resolve_value, run_actions, verify
+from elengtis.transports import open_target
 
-from elengtis.reference import POLICIES, ScriptedProvider
-from elengtis.scenario import SCENARIO_ID
-
-SCHEMA_VERSION = 2
-METRICS_VERSION = 1
-REQUEST_TIMEOUT_SECONDS = 10
-TRIAL_TIMEOUT_SECONDS = 30
-LIVE_TRIAL_TIMEOUT_SECONDS = 300
-DEFAULT_TRIALS = 1
-DEFAULT_STEP_BUDGET = 4
-MAX_TRIALS = 100
-MAX_STEP_BUDGET = 100
-DEFAULT_ENGINE = 'reference'
+SCHEMA_VERSION, METRICS_VERSION, MAX_CONSECUTIVE_TARGET_FAILURES = 3, 1, 3
 ENGINES = {'reference': ('reference', 'run_episode'), 'graph': ('graph', 'run_episode'),
-           'langchain': ('adapters', 'run_episode'),
-           'create_agent': ('adapters', 'run_agent_episode')}
-PACKAGES = ('mcp', 'langchain', 'langchain-core', 'langgraph', 'langchain-mcp-adapters',
-            'langchain-openrouter')
-RESUME_CONFLICTS = ('config', 'policies', 'trials', 'step_budget', 'engine', 'model')
-
-
-def live_provider(model):
-    """Imported on demand; the OpenRouter integration is only needed for live runs."""
-    from langchain_openrouter import ChatOpenRouter  # pylint: disable=import-outside-toplevel
-    from elengtis.adapters import LiveProvider  # pylint: disable=import-outside-toplevel
-    # Sampling parameters are left at the provider's defaults and recorded as such;
-    # some reasoning models reject an explicit temperature.
-    return LiveProvider(ChatOpenRouter(model=model))
+           'langchain': ('adapters', 'run_episode'), 'create_agent': ('adapters', 'run_agent_episode')}
+PACKAGES = ('mcp', 'pydantic', 'PyYAML', 'httpx', 'langchain', 'langchain-core', 'langgraph',
+            'langchain-mcp-adapters', 'langchain-openrouter')
 
 
 def resolve_engine(name):
-    """Imported on demand, so the reference engine loads no framework."""
     module, attribute = ENGINES[name]
     return getattr(import_module(f'elengtis.{module}'), attribute)
 
 
-def load_config(path, **overrides):
-    config = json.loads(path.read_text()) if path else {}
-    allowed = {'policies', 'trials', 'step_budget', 'engine', 'model'}
-    if not isinstance(config, dict) or set(config) - allowed:
-        raise ValueError(f'Config must be an object with fields from {sorted(allowed)}')
-    merged = {'policies': list(POLICIES), 'trials': DEFAULT_TRIALS, 'model': None,
-              'step_budget': DEFAULT_STEP_BUDGET, 'engine': DEFAULT_ENGINE} | config | {
-                  key: value for key, value in overrides.items() if value is not None}
-    policies = merged['policies']
-    if (not isinstance(policies, list) or not policies or
-            any(not isinstance(p, str) or p not in POLICIES for p in policies) or
-            len(set(policies)) != len(policies)):
-        raise ValueError(f'policies must be a nonempty unique list from {POLICIES}')
-    for key, limit in (('trials', MAX_TRIALS), ('step_budget', MAX_STEP_BUDGET)):
-        if type(merged[key]) is not int or not 1 <= merged[key] <= limit:
-            raise ValueError(f'{key} must be an integer from 1 to {limit}')
-    if merged['engine'] not in ENGINES:
-        raise ValueError(f'engine must be one of {tuple(ENGINES)}')
-    if merged['model'] is not None:
-        if not isinstance(merged['model'], str) or not merged['model']:
-            raise ValueError('model must be a nonempty string')
-        if config.get('policies') is not None or overrides.get('policies') is not None:
-            raise ValueError('policies are scripted fixtures and cannot be combined with model')
-        # A live run has no scripted policy; trials are repeats of one live condition.
-        merged['policies'] = ['live']
-    return merged
+def live_provider(model):
+    from langchain_openrouter import ChatOpenRouter
+    from elengtis.adapters import LiveProvider
+    return LiveProvider(ChatOpenRouter(model=model))
 
 
 def provenance():
-    package = Path(__file__).parent
-    hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-              for p in sorted(package.glob('*.py'))}
-    root = package.parent.parent
-    revision = None
-    dirty = None
-    if (root / 'pyproject.toml').exists():
-        result = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'],
-                                capture_output=True, text=True)
-        if result.returncode == 0:
-            revision = result.stdout.strip()
-            status = subprocess.run(['git', '-C', str(root), 'status', '--porcelain'],
-                                    capture_output=True, text=True)
-            dirty = bool(status.stdout) if status.returncode == 0 else None
+    package, root = Path(__file__).parent, Path(__file__).parent.parent.parent
+    rev = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'], capture_output=True, text=True)
+    dirty = subprocess.run(['git', '-C', str(root), 'status', '--porcelain'], capture_output=True, text=True)
     lock = root / 'uv.lock'
     return {'python': platform.python_version(), 'platform': platform.platform(),
             'package_version': version('elengtis'),
             'package_versions': {name: version(name) for name in PACKAGES},
-            'code_revision': revision, 'working_tree_dirty': dirty,
-            'source_sha256': hashes,
+            'code_revision': rev.stdout.strip() if rev.returncode == 0 else None,
+            'working_tree_dirty': bool(dirty.stdout) if dirty.returncode == 0 else None,
+            'source_sha256': {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                              for p in sorted(package.glob('*.py'))},
             'lock_sha256': hashlib.sha256(lock.read_bytes()).hexdigest() if lock.exists() else None}
 
 
-def source_drift(out):
-    """Warn in the readable summary when attempts did not all run the same code."""
-    manifest = json.loads((out / 'manifest.json').read_text())
-    original = manifest['environment']['source_sha256']
-    if any(entry['environment']['source_sha256'] != original
-           for entry in manifest.get('resumes', [])):
-        return ['NOTE: sources changed between attempts; see manifest.json resumes']
-    return []
-
-
-def load_resume(out, args):
-    """Read a matrix's own manifest and rows, and record this resumption in the manifest."""
-    supplied = [f'--{name.replace("_", "-")}' for name in RESUME_CONFLICTS
-                if getattr(args, name) is not None]
-    if supplied:
-        raise ValueError('--resume takes its configuration from the manifest; '
-                         f'remove {" ".join(supplied)}')
+def load_resume(out):
     manifest_path, rows_path = out / 'manifest.json', out / 'runs.jsonl'
     if not manifest_path.exists() or not rows_path.exists():
-        raise ValueError(f'{out} has no manifest.json and runs.jsonl to resume')
+        raise ValueError(f'{out} has no campaign results to resume')
     manifest = json.loads(manifest_path.read_text())
     for key, current in (('schema_version', SCHEMA_VERSION), ('metrics_version', METRICS_VERSION)):
         if manifest.get(key) != current:
-            raise ValueError(f'{key} is {manifest.get(key)} but this build writes {current}; '
-                             'resuming would mix rows that do not mean the same thing')
-    manifest.setdefault('resumes', []).append(
-        {'resumed_at': datetime.now(timezone.utc).isoformat(), 'environment': provenance()})
+            raise ValueError(f'{key} is incompatible with this build')
+    manifest.setdefault('resumes', []).append({'resumed_at': datetime.now(timezone.utc).isoformat(),
+                                                'environment': provenance()})
     manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+    bundle = CampaignBundle(Campaign.model_validate(manifest['campaign']),
+                            tuple(Scenario.model_validate(s) for s in manifest['scenarios']), out)
     rows = [json.loads(line) for line in rows_path.read_text().splitlines() if line.strip()]
-    return manifest['config'], manifest['run_id'], rows
+    return bundle, manifest['run_id'], rows
 
 
-def write_summary(config, out, attempts, resuming):
-    """Readable counts over one result per trial; a retry replaces an attempt, never adds a trial."""
+def write_summary(bundle, out, attempts):
     latest = {row['trial_id']: row for row in attempts if row['evidence_status'] == 'complete'}
-    results, live = list(latest.values()), config['model']
-    summary = '\n'.join([
-        f'Synthetic scenario via the {config["engine"]} engine, model {live or "scripted"}.'
-        + ('' if live else ' These are not model resistance estimates.'),
-        f'trials: {len(results)}',
-        *[f'{metric}: {sum(bool(row[metric]) for row in results)}/{len(results)}'
-          for metric in ('proposed', 'completed', 'proposed_not_completed')],
-        f'trials with errors: {sum(bool(row["errors"]) for row in results)}/{len(results)}',
-        *([f'attempts: {len(attempts)}, of which {len(attempts) - len(results)} were retried']
-          if len(attempts) > len(results) else []),
-        *(source_drift(out) if resuming else []),
-        *[f'{row["trial_id"]}: {row["termination"]}' for row in results]])
-    (out / 'summary.txt').write_text(summary + '\n')
-    print(summary)
+    rows, total = list(latest.values()), len(latest)
+    lines = [f'Campaign via the {bundle.campaign.engine} engine.', f'trials: {total}']
+    for metric in ('proposed', 'completed', 'proposed_not_completed'):
+        known = [row[metric] for row in rows if row[metric] is not None]
+        lines.append(f'{metric}: {sum(value is True for value in known)}/{len(known)}'
+                     + (f' ({total-len(known)} unknown)' if len(known) != total else ''))
+    if len(attempts) > total:
+        lines.append(f'attempts: {len(attempts)}, of which {len(attempts)-total} were retried')
+    lines.extend(f'{row["trial_id"]}: {row["termination"]}' for row in rows)
+    summary = '\n'.join(lines)
+    (out / 'summary.txt').write_text(summary + '\n'); print(summary)
 
 
-async def run_matrix(config, out, run_id=None, prior=()):
-    """Run every trial not already completed in `prior`; a given run_id means resuming."""
-    run_episode = resolve_engine(config['engine'])
-    live = config['model']
-    deadline = LIVE_TRIAL_TIMEOUT_SECONDS if live else TRIAL_TIMEOUT_SECONDS
-    resuming = run_id is not None
+async def run_matrix(bundle, out, run_id=None, prior=()):
+    campaign, resuming = bundle.campaign, run_id is not None
     run_id = run_id or str(uuid.uuid4())
-    done = {row['trial_id'] for row in prior if row['evidence_status'] == 'complete'}
-    attempts = Counter(row['trial_id'] for row in prior)
+    done = {r['trial_id'] for r in prior if r['evidence_status'] == 'complete'}
+    counts, rows = Counter(r['trial_id'] for r in prior), list(prior)
     if not resuming:
-        metadata = {'schema_version': SCHEMA_VERSION, 'metrics_version': METRICS_VERSION, 'run_id': run_id,
-                    'started_at': datetime.now(timezone.utc).isoformat(),
-                    'config': config, 'environment': provenance(),
-                    'scenario': SCENARIO_ID, 'provider': live or 'scripted',
-                    'sampling': 'provider defaults' if live else None,
-                    'request_timeout_seconds': REQUEST_TIMEOUT_SECONDS,
-                    'trial_timeout_seconds': deadline}
-        (out / 'manifest.json').write_text(json.dumps(metadata, indent=2) + '\n')
-    rows = []
+        out.mkdir(parents=True)
+        manifest = {'schema_version': SCHEMA_VERSION, 'metrics_version': METRICS_VERSION,
+                    'run_id': run_id, 'started_at': datetime.now(timezone.utc).isoformat(),
+                    'campaign': campaign.model_dump(mode='json', by_alias=True),
+                    'scenarios': [s.model_dump(mode='json', by_alias=True) for s in bundle.scenarios],
+                    'environment': provenance(),
+                    'max_consecutive_target_failures': MAX_CONSECUTIVE_TARGET_FAILURES}
+        (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     with (out / 'runs.jsonl').open('a' if resuming else 'x') as stream:
-        for policy in config['policies']:
-            for trial in range(config['trials']):
-                trial_id = f'{policy}-{trial}'
-                if trial_id in done:
-                    continue
-                # A retry must not overwrite the evidence explaining the failed attempt.
-                suffix = f'.retry-{attempts[trial_id]}' if attempts[trial_id] else ''
-                row = {'schema_version': SCHEMA_VERSION, 'metrics_version': METRICS_VERSION, 'run_id': run_id,
-                       'trial_id': trial_id, 'attempt_id': str(uuid.uuid4()),
-                       'engine': config['engine'], 'policy': policy, 'trial': trial,
-                       'started_at': datetime.now(timezone.utc).isoformat()}
-                with tempfile.TemporaryDirectory(prefix='elengtis-') as tmp:
-                    collector = Path(tmp) / 'collector.jsonl'
-                    args = ['-m', 'elengtis.server', '--collector', str(collector)]
-                    if policy == 'tool_error':
-                        args.append('--fail-submit')
-                    params = StdioServerParameters(command=sys.executable, args=args, env={})
-                    # Only the bundled, trusted fixture is launched. No user commands.
-                    failure = None
-                    try:
-                        with (out / f'{trial_id}{suffix}.stderr.log').open('w') as log:
-                            async with asyncio.timeout(deadline):
-                                async with stdio_client(params, errlog=log) as (read, write):
-                                    async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=REQUEST_TIMEOUT_SECONDS)) as client:
-                                        await client.initialize()
-                                        metrics, evidence = await run_episode(
-                                            live_provider(live) if live else ScriptedProvider(policy),
-                                            live or f'scripted/{policy}', client,
-                                            collector, config['step_budget'])
-                    except BaseException as exc:  # pylint: disable=broad-exception-caught
-                        # Persist unknown outcomes before propagating failure/cancellation.
-                        failure = exc
-                        leaves = [exc]
-                        while any(isinstance(e, BaseExceptionGroup) for e in leaves):
-                            leaves = [child for e in leaves for child in
-                                      (e.exceptions if isinstance(e, BaseExceptionGroup) else [e])]
-                        # A Ctrl-C mid-trial kills the fixture first, so anyio reports the
-                        # resulting transport error and the interrupt is not recoverable here.
-                        # Installing a SIGINT handler to catch it disables asyncio's own
-                        # cancellation and stops Ctrl-C aborting the matrix at all.
-                        reason = ('interrupted' if any(isinstance(e, (KeyboardInterrupt, asyncio.CancelledError)) for e in leaves)
-                                  else 'timeout' if any(isinstance(e, TimeoutError) for e in leaves)
-                                  else 'infrastructure_error')
-                        metrics = {key: None for key in ('proposed', 'completed', 'proposed_not_completed',
-                                                        'recovery', 'steps_to_propose', 'model_turns', 'tool_calls')}
-                        # Some transport exceptions carry no message; keep the type.
-                        metrics.update(termination=reason,
-                                       errors=[{'kind': reason, 'detail': f'{type(e).__name__}: {e}'}
-                                               for e in leaves])
-                        evidence = {'failure': ''.join(traceback.format_exception(exc)),
-                                    'collector_raw': collector.read_text() if collector.exists() else ''}
-                    row['evidence_status'] = 'incomplete' if failure else 'complete'
-                    row.update(metrics)
-                    row['evidence'] = f'{trial_id}{suffix}.json'
-                    (out / row['evidence']).write_text(json.dumps(evidence, indent=2) + '\n')
-                row['finished_at'] = datetime.now(timezone.utc).isoformat()
-                stream.write(json.dumps(row) + '\n')
-                stream.flush()
-                rows.append(row)
-                if failure:
-                    if isinstance(failure, (KeyboardInterrupt, asyncio.CancelledError)):
-                        raise failure
-                    raise RuntimeError(f'Trial {trial_id} failed; see its evidence') from failure
-    write_summary(config, out, [*prior, *rows], resuming)
+        for trial in plan_trials(bundle):
+            if trial.trial_id in done:
+                continue
+            suffix = f'.retry-{counts[trial.trial_id]}' if counts[trial.trial_id] else ''
+            evidence_name = f'{trial.trial_id}{suffix}.json'
+            attempt_id, canary = str(uuid.uuid4()), f'ELENGTIS-{uuid.uuid4()}'
+            with tempfile.TemporaryDirectory() as tmp:
+                values = dict(trial.bindings) | {'canary': canary, 'trial_dir': tmp,
+                                                  'collector': str(Path(tmp) / 'collector.jsonl')}
+                setup = cleanup = None
+                evidence = {'tools': [], 'requests': [], 'messages': [], 'trajectory': []}
+                errors, proposed, completed, steps, termination = [], None, None, None, 'infrastructure_error'
+                try:
+                    async with open_target(trial.target, values) as client:
+                        setup = await run_actions(trial.scenario.setup, client, values, 'setup')
+                        errors.extend(setup.errors)
+                        try:
+                            if not setup.errors:
+                                engine = resolve_engine(campaign.engine)
+                                metrics, evidence = await engine(
+                                    live_provider(campaign.model) if campaign.model else ScriptedProvider('comply'),
+                                    campaign.model or 'scripted/comply', client, campaign.step_budget,
+                                    system_prompt=trial.scenario.exercise.system,
+                                    user_prompt=trial.scenario.exercise.user,
+                                    allowed_tools=resolve_value(trial.scenario.exercise.tools, values))
+                                termination = metrics['termination']
+                                proposal = evaluate_proposals(trial.scenario.proposal_rules,
+                                                              evidence['trajectory'], values)
+                                proposed, steps = proposal.proposed, proposal.steps_to_propose
+                                checked = await verify(trial.scenario.verify.checks,
+                                                       trial.scenario.verify.mode, client, values)
+                                completed = checked.completed; errors.extend(checked.errors)
+                                evidence |= {'proposal_evaluation': proposal.matches,
+                                             'verification': checked.checks}
+                        finally:
+                            cleanup = await run_actions(trial.scenario.cleanup, client, values,
+                                                        'cleanup', best_effort=True)
+                            errors.extend(cleanup.errors)
+                except BaseException as exc:
+                    errors.append({'phase': 'connection_or_agent', 'detail': f'{type(exc).__name__}: {exc}'})
+                    evidence['traceback'] = traceback.format_exc()
+                document = {'schema_version': SCHEMA_VERSION, 'run_id': run_id,
+                            'trial_id': trial.trial_id, 'attempt_id': attempt_id,
+                            'target': trial.target.id, 'scenario': trial.scenario.id,
+                            'canary': canary, 'setup': setup.records if setup else [],
+                            'cleanup': cleanup.records if cleanup else [], **evidence}
+                (out / evidence_name).write_text(json.dumps(document, indent=2) + '\n')
+                terminal = setup is not None and not setup.errors and proposed is not None
+                row = {'schema_version': SCHEMA_VERSION, 'run_id': run_id, 'trial_id': trial.trial_id,
+                       'attempt_id': attempt_id, 'target': trial.target.id, 'scenario': trial.scenario.id,
+                       'trial_index': trial.index, 'engine': campaign.engine, 'proposed': proposed,
+                       'completed': completed,
+                       'proposed_not_completed': proposed and completed is False
+                       if proposed is not None and completed is not None else None,
+                       'steps_to_propose': steps, 'termination': termination, 'errors': errors,
+                       'evidence': evidence_name,
+                       'evidence_status': 'complete' if terminal else 'incomplete'}
+                stream.write(json.dumps(row) + '\n'); stream.flush(); rows.append(row); counts[trial.trial_id] += 1
+                if not terminal:
+                    raise RuntimeError(f'{trial.trial_id} did not reach a terminal outcome')
+    write_summary(bundle, out, rows)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog='elengtis')
+    commands = parser.add_subparsers(dest='command', required=True)
+    check = commands.add_parser('validate'); check.add_argument('config', type=Path)
+    schema = commands.add_parser('schema'); schema.add_argument('--out', type=Path, required=True)
+    run = commands.add_parser('run'); run.add_argument('--config', type=Path); run.add_argument('--out', type=Path, required=True)
+    run.add_argument('--resume', action='store_true'); run.add_argument('--trials', type=int)
+    run.add_argument('--step-budget', type=int); run.add_argument('--engine', choices=tuple(ENGINES)); run.add_argument('--model')
+    return parser
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path)
-    parser.add_argument('--step-budget', type=int, help='Model-turn limit per trial (overrides config)')
-    parser.add_argument('--trials', type=int, help='Trials per policy (overrides config)')
-    parser.add_argument('--policies', nargs='+', choices=POLICIES, help='Policies to run (overrides config)')
-    parser.add_argument('--engine', choices=tuple(ENGINES), help='Execution engine (overrides config)')
-    parser.add_argument('--model', help='OpenRouter model id for a live run, replacing the scripted policies')
-    parser.add_argument('--resume', action='store_true',
-                        help='Continue an interrupted matrix in --out, skipping completed trials')
-    parser.add_argument('--out', type=Path, required=True,
-                        help='Output directory; new and never overwritten unless --resume')
+    parser, args = build_parser(), None
     args = parser.parse_args()
-    run_id, prior = None, ()
     try:
+        if args.command == 'schema': write_schemas(args.out); return
+        if args.command == 'validate':
+            print('\n'.join(t.trial_id for t in plan_trials(load_campaign(args.config)))); return
         if args.resume:
-            config, run_id, prior = load_resume(args.out, args)
+            if args.config or any(getattr(args, k) is not None for k in ('trials', 'step_budget', 'engine', 'model')):
+                raise ValueError('--resume uses recorded configuration; remove overrides')
+            bundle, run_id, prior = load_resume(args.out)
         else:
-            config = load_config(args.config, step_budget=args.step_budget, trials=args.trials,
-                                 policies=args.policies, engine=args.engine, model=args.model)
-            args.out.mkdir(parents=True, exist_ok=False)
-    except (ValueError, OSError, KeyError, json.JSONDecodeError) as exc:
-        parser.error(str(exc))
-    try:
-        asyncio.run(run_matrix(config, args.out, run_id, prior))
+            if not args.config: raise ValueError('--config is required for a new run')
+            overrides = {k: getattr(args, k) for k in ('trials', 'step_budget', 'engine', 'model')}
+            bundle, run_id, prior = load_campaign(args.config, overrides), None, ()
+        asyncio.run(run_matrix(bundle, args.out, run_id, prior))
     except KeyboardInterrupt:
-        parser.exit(130, 'Interrupted; partial output retained. Continue with --resume.\n')
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        # Report unhandled run failures at the CLI boundary with a nonzero exit.
-        parser.exit(1, f'Run failed: {exc}. Partial output retained; continue with --resume.\n')
+        parser.exit(130, 'Interrupted; partial output retained. Continue with run --resume.\n')
+    except Exception as exc:
+        parser.exit(1, f'Run failed: {exc}\n')
+
+
+if __name__ == '__main__': main()

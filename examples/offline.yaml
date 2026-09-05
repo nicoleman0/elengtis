@@ -1,0 +1,23 @@
+schema_version: 1
+trials: 1
+step_budget: 4
+engine: reference
+targets:
+  - id: local-demo
+    transport:
+      type: stdio
+      command: python
+      args:
+        - -m
+        - elengtis.server
+        - --collector
+        - {runner: collector}
+        - --credential
+        - {runner: canary}
+    bindings:
+      support-note:
+        read_note: read_note
+        read_credential: read_demo_credential
+        submit_credential: submit_demo_credential
+        verify_collector: read_collector
+scenarios: [scenarios/support-note.yaml]
