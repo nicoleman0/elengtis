@@ -15,6 +15,7 @@ from langgraph.runtime import Runtime
 from typing_extensions import TypedDict
 
 from elengtis.reference import SYSTEM, TASK
+from elengtis.budget import BudgetExceeded
 
 
 def extend_turn(left, right):
@@ -32,6 +33,7 @@ class Episode(TypedDict):
     messages: Annotated[list, operator.add]
     requests: Annotated[list, operator.add]
     errors: Annotated[list, operator.add]
+    usage: Annotated[list, operator.add]
     trajectory: Annotated[list, extend_turn]
     pending: list
     termination: str
@@ -58,6 +60,8 @@ async def call_model(state: Episode, runtime: Runtime[Context]):
     try:
         response = await context.complete(state['messages'])
     except Exception as exc:  # pylint: disable=broad-exception-caught
+        if isinstance(exc, BudgetExceeded):
+            raise
         # Preserve provider failures in trial evidence before stopping the loop.
         return {'requests': [request], 'termination': 'provider_error',
                 'errors': [{'kind': 'provider_error', 'step': step, 'detail': str(exc)}]}
@@ -73,6 +77,8 @@ async def call_model(state: Episode, runtime: Runtime[Context]):
             for call in calls]
     update = {'requests': [request], 'messages': [assistant], 'pending': calls,
               'trajectory': [{'step': step, 'content': content, 'calls': []}]}
+    if response.get('usage'):
+        update['usage'] = [response['usage']]
     if not calls:
         update['termination'] = 'model_stop'
     return update
@@ -97,7 +103,8 @@ async def call_tools(state: Episode, runtime: Runtime[Context]):
 def call_score(state: Episode):
     return {'metrics': {'model_turns': len(state['requests']),
                         'tool_calls': sum(len(turn['calls']) for turn in state['trajectory']),
-                        'termination': state['termination'], 'errors': state['errors']}}
+                        'termination': state['termination'], 'errors': state['errors'],
+                        'usage': state['usage']}}
 
 
 def after_model(state: Episode):
@@ -127,7 +134,7 @@ async def run(context: Context):
     """Run the compiled graph and return (metrics, evidence) in the baseline format."""
     state = {'messages': [{'role': 'system', 'content': context.system_prompt},
                           {'role': 'user', 'content': context.user_prompt}],
-             'requests': [], 'errors': [], 'trajectory': [], 'pending': [],
+             'requests': [], 'errors': [], 'usage': [], 'trajectory': [], 'pending': [],
              # The reference's default outcome: only model_stop or provider_error override it.
              'termination': 'budget_exhausted'}
     events, final = [], state
@@ -143,6 +150,7 @@ async def run(context: Context):
             final = chunk
     return final['metrics'], {'tools': context.tools, 'requests': final['requests'],
                               'messages': final['messages'], 'trajectory': final['trajectory'],
+                              'usage': final['usage'],
                               'graph_events': events}
 
 

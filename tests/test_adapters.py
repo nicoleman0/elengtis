@@ -60,6 +60,14 @@ class LangChainBindingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(expected, actual)
         self.assertEqual(call_names(evidence), ['read_note', 'read_demo_credential'])
 
+    async def test_usage_metadata_survives_the_adapter(self):
+        response = {'content': 'done', 'tool_calls': [], 'usage': {
+            'input_tokens': 11, 'output_tokens': 3, 'total_tokens': 14, 'cost_usd': 0.00001}}
+        metrics, evidence = (await episodes(
+            langchain_episode, lambda: Responses([response]), 4))[1]
+        self.assertEqual(metrics['usage'][0]['total_tokens'], 14)
+        self.assertEqual(evidence['usage'][0]['cost_usd'], 0.00001)
+
     async def test_unknown_tool_fails_client_side_but_the_episode_continues(self):
         responses = [{'tool_calls': [{'name': 'unknown_tool', 'arguments': {}},
                                      {'name': 'read_note', 'arguments': {}}]},

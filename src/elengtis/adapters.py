@@ -17,6 +17,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 from pydantic import Field
 
 from elengtis import graph
+from elengtis.budget import BudgetExceeded
 from elengtis.reference import SYSTEM, TASK
 
 ROLES = {'system': 'system', 'human': 'user', 'ai': 'assistant', 'tool': 'tool'}
@@ -65,6 +66,22 @@ def to_langchain(messages):
     return converted
 
 
+def usage_record(message):
+    """Keep provider usage/cost metadata in a small JSON-safe record."""
+    usage = message.usage_metadata or {}
+    metadata = message.response_metadata or {}
+    record = {key: usage[key] for key in ('input_tokens', 'output_tokens', 'total_tokens')
+              if usage.get(key) is not None}
+    if metadata.get('cost') is not None or metadata.get('cost_usd') is not None:
+        record['cost_usd'] = metadata.get('cost', metadata.get('cost_usd'))
+    if metadata.get('cost_details') is not None:
+        record['cost_details'] = metadata['cost_details']
+    for key in ('provider', 'model_provider', 'system_fingerprint', 'native_finish_reason'):
+        if metadata.get(key) is not None:
+            record[key] = metadata[key]
+    return record
+
+
 class LiveProvider:
     """A LangChain chat model behind the reference loop's provider interface.
 
@@ -72,14 +89,28 @@ class LiveProvider:
     engines stays attributable to orchestration rather than to a second provider.
     """
 
-    def __init__(self, chat):
+    def __init__(self, chat, budget=None):
         self.chat = chat
+        self.budget = budget
 
     async def complete(self, model, messages, tools):
-        response = await self.chat.ainvoke(to_langchain(messages), tools=tools)
+        reservation = self.budget.reserve(
+            model, messages, tools, self.chat.max_tokens or self.chat.max_completion_tokens or 0
+        ) if self.budget else None
+        try:
+            response = await self.chat.ainvoke(to_langchain(messages), tools=tools)
+        except Exception:
+            if self.budget:
+                self.budget.settle(reservation, None)
+            raise
+        usage = usage_record(response)
+        if self.budget:
+            usage['_rates'] = self.budget.pricing[model]
+            usage['budget_charge_usd'] = self.budget.settle(reservation, usage)
+            usage.pop('_rates', None)
         return {'content': text_of(response),
                 'tool_calls': [{'name': call['name'], 'arguments': call['args']}
-                               for call in response.tool_calls]}
+                               for call in response.tool_calls], 'usage': usage}
 
 
 class RecordingChatModel(BaseChatModel):
@@ -92,6 +123,7 @@ class RecordingChatModel(BaseChatModel):
     provider: Any
     model_name: str
     requests: list = Field(default_factory=list)
+    usages: list = Field(default_factory=list)
 
     @property
     def _llm_type(self):
@@ -109,9 +141,19 @@ class RecordingChatModel(BaseChatModel):
         self.requests.append({'model': self.model_name, 'messages': baseline, 'tools': tools})
         turn = sum(message['role'] == 'assistant' for message in baseline)
         response = await self.provider.complete(self.model_name, baseline, tools)
+        usage = response.get('usage')
+        self.usages.append(usage)
+        usage_metadata = {key: usage[key] for key in ('input_tokens', 'output_tokens', 'total_tokens')
+                          if usage and usage.get(key) is not None} or None
+        response_metadata = {key: usage[key] for key in ('cost_details', 'provider', 'model_provider',
+                                                          'system_fingerprint', 'native_finish_reason')
+                             if usage and usage.get(key) is not None}
+        if usage and usage.get('cost_usd') is not None:
+            response_metadata['cost'] = usage['cost_usd']
         message = AIMessage(content=response.get('content') or '', tool_calls=[
             {'id': f'call_{turn}_{i}', 'name': call['name'], 'args': call.get('arguments') or {}}
-            for i, call in enumerate(response.get('tool_calls', []))])
+            for i, call in enumerate(response.get('tool_calls', []))],
+            usage_metadata=usage_metadata, response_metadata=response_metadata)
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
@@ -138,7 +180,7 @@ async def run_episode(provider, model, client, step_budget, system_prompt=SYSTEM
         response = await chat.ainvoke(to_langchain(messages))
         return {'content': response.content,
                 'tool_calls': [{'name': call['name'], 'arguments': call['args']}
-                               for call in response.tool_calls]}
+                               for call in response.tool_calls], 'usage': usage_record(response)}
 
     async def dispatch(name, arguments):
         if name not in by_name:
@@ -196,6 +238,8 @@ async def run_agent_episode(provider, model, client, step_budget, system_prompt=
     try:
         messages = (await agent.ainvoke({'messages': [HumanMessage(user_prompt)]}))['messages']
     except Exception as exc:  # pylint: disable=broad-exception-caught
+        if isinstance(exc, BudgetExceeded):
+            raise
         # Preserve provider failures in trial evidence before stopping the episode.
         errors.append({'kind': 'provider_error', 'step': len(chat.requests) - 1,
                        'detail': str(exc)})
@@ -211,7 +255,8 @@ async def run_agent_episode(provider, model, client, step_budget, system_prompt=
                                'detail': result['content'].removeprefix('ERROR: ')})
     metrics = {'model_turns': len(chat.requests),
                'tool_calls': sum(len(turn['calls']) for turn in trajectory),
-               'termination': termination, 'errors': errors}
+               'termination': termination, 'errors': errors,
+               'usage': [usage for usage in chat.usages if usage]}
     return metrics, {'tools': [convert_to_openai_tool(tool) for tool in tools],
                      'requests': chat.requests, 'messages': to_baseline(messages),
-                     'trajectory': trajectory}
+                     'trajectory': trajectory, 'usage': metrics['usage']}
