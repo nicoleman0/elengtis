@@ -104,7 +104,7 @@ async def run_matrix(config, out):
                                         metrics, evidence = await run_episode(
                                             ScriptedProvider(policy), f'scripted/{policy}', client,
                                             collector, config['step_budget'])
-                    except BaseException as exc:
+                    except BaseException as exc:  # pylint: disable=broad-exception-caught
                         # Persist unknown outcomes before propagating failure/cancellation.
                         failure = exc
                         leaves = [exc]
@@ -156,5 +156,6 @@ def main():
         asyncio.run(run_matrix(config, args.out))
     except KeyboardInterrupt:
         parser.exit(130, 'Interrupted; partial output retained. Resume is not implemented.\n')
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        # Report unhandled run failures at the CLI boundary with a nonzero exit.
         parser.exit(1, f'Run failed: {exc}. Partial output retained.\n')
