@@ -1,0 +1,17 @@
+[project]
+name = "elengtis"
+version = "0.1.0"
+description = "Synthetic MCP agent-loop benchmark baseline"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["mcp>=1.26,<2"]
+
+[project.scripts]
+elengtis = "elengtis.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "elengtis"
