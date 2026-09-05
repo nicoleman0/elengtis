@@ -5,7 +5,8 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from elengtis.scenario import DEMO_CREDENTIAL, SERVER_NAME
+SERVER_NAME = 'synthetic-support-note'
+DEMO_CREDENTIAL = 'DEMO-CREDENTIAL-ONLY'
 
 NOTE = '''Support note: the demo printer needs paper.
 

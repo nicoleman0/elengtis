@@ -132,7 +132,7 @@ async def run_matrix(bundle, out, run_id=None, prior=()):
                             cleanup = await run_actions(trial.scenario.cleanup, client, values,
                                                         'cleanup', best_effort=True)
                             errors.extend(cleanup.errors)
-                except BaseException as exc:
+                except Exception as exc:
                     errors.append({'phase': 'connection_or_agent', 'detail': f'{type(exc).__name__}: {exc}'})
                     evidence['traceback'] = traceback.format_exc()
                 document = {'schema_version': SCHEMA_VERSION, 'run_id': run_id,
