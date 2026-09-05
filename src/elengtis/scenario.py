@@ -1,7 +1,12 @@
 """Declarative scenario evaluation plus the legacy synthetic fixture contract."""
 from dataclasses import dataclass
 import json
+import os
 import re
+
+import httpx
+
+from elengtis.config import HttpAction
 
 SERVER_NAME = 'synthetic-support-note'
 SCENARIO_ID = f'{SERVER_NAME}-v1'
@@ -14,6 +19,19 @@ class ProposalEvaluation:
     proposed: bool
     steps_to_propose: int | None
     matches: list[dict]
+
+
+@dataclass
+class ActionRun:
+    records: list[dict]
+    errors: list[dict]
+
+
+@dataclass
+class VerificationResult:
+    completed: bool | None
+    checks: list[dict]
+    errors: list[dict]
 
 
 def resolve_value(value, values):
@@ -76,6 +94,77 @@ def evaluate_proposals(rules, trajectory, values):
                                     'step': turn['step'], 'predicates': verdicts})
     first = min((match['step'] for match in matches), default=None)
     return ProposalEvaluation(bool(matches), first, matches)
+
+
+async def _run_action(action, client, values, http_client):
+    if isinstance(action, HttpAction):
+        headers = {name: os.environ[ref.env] for name, ref in action.headers.items()}
+        own_client = http_client is None
+        http_client = http_client or httpx.AsyncClient(follow_redirects=False, timeout=10)
+        try:
+            response = await http_client.request(
+                action.method, resolve_value(action.url, values), headers=headers,
+                json=resolve_value(action.body, values))
+            try:
+                body = response.json()
+            except ValueError:
+                body = response.text[:100_000]
+            raw = {'status': response.status_code, 'body': body,
+                   'truncated': len(response.content) > 100_000}
+        finally:
+            if own_client:
+                await http_client.aclose()
+        shown = {'method': action.method, 'url': action.url,
+                 'headers': {name: {'env': ref.env} for name, ref in action.headers.items()}}
+    else:
+        tool = resolve_value(action.tool, values)
+        arguments = resolve_value(action.arguments, values)
+        result = await client.call_tool(tool, arguments)
+        raw = result.model_dump(mode='json', by_alias=True, exclude_none=True)
+        shown = {'tool': tool, 'arguments': arguments}
+    for name, path in action.capture.items():
+        values[name] = pointer(raw, path)
+    return {'id': action.id, 'type': action.type, 'status': 'ok',
+            'input': shown, 'response': raw}
+
+
+async def run_actions(actions, client, values, phase, http_client=None, best_effort=False):
+    records, errors = [], []
+    for action in actions:
+        try:
+            records.append(await _run_action(action, client, values, http_client))
+        except Exception as exc:  # lifecycle evidence must survive target failures
+            error = {'phase': phase, 'action_id': action.id,
+                     'detail': f'{type(exc).__name__}: {exc}'}
+            errors.append(error)
+            records.append({'id': action.id, 'type': action.type, 'status': 'error',
+                            'error': error['detail']})
+            if not best_effort:
+                break
+    return ActionRun(records, errors)
+
+
+async def verify(checks, mode, client, values, http_client=None):
+    records, errors, verdicts = [], [], []
+    for check in checks:
+        run = await run_actions([check.action], client, values, 'verification', http_client)
+        errors.extend(run.errors)
+        record = run.records[0]
+        assertions = []
+        if not run.errors:
+            for assertion in check.assertions:
+                try:
+                    actual = pointer(record['response'], assertion.path)
+                    expected = resolve_value(assertion.value, values)
+                    matched = compare(actual, assertion.op, expected)
+                except (KeyError, IndexError, TypeError, ValueError):
+                    actual, expected, matched = None, resolve_value(assertion.value, values), False
+                assertions.append({'path': assertion.path, 'op': assertion.op,
+                                   'actual': actual, 'expected': expected, 'matched': matched})
+            verdicts.append(all(item['matched'] for item in assertions))
+        records.append({'id': check.id, 'action': record, 'assertions': assertions})
+    completed = None if errors else (all(verdicts) if mode == 'all' else any(verdicts))
+    return VerificationResult(completed, records, errors)
 
 
 def score(collector, requests, trajectory, termination, errors, steps_to_propose):

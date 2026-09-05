@@ -1,7 +1,12 @@
 import unittest
+from pathlib import Path
+import sys
+import tempfile
 
-from elengtis.config import Predicate, ProposalRule, Examples, ToolExample
-from elengtis.scenario import evaluate_proposals, pointer, resolve_value
+from elengtis.config import (Examples, McpAction, Predicate, ProposalRule,
+                             StdioTransport, Target, ToolExample, Verifier)
+from elengtis.scenario import evaluate_proposals, pointer, resolve_value, run_actions, verify
+from elengtis.transports import open_target
 
 
 class ScenarioEvaluationTests(unittest.TestCase):
@@ -47,6 +52,39 @@ class ScenarioEvaluationTests(unittest.TestCase):
         result = evaluate_proposals([rule], [{'step': 0, 'calls': []}], {})
         self.assertFalse(result.proposed)
         self.assertIsNone(result.steps_to_propose)
+
+
+class LifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mcp_action_captures_response_and_verifies_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Target(id='local', transport=StdioTransport(
+                type='stdio', command=sys.executable,
+                args=['-m', 'elengtis.server', '--collector', str(Path(tmp) / 'out.jsonl')]),
+                bindings={'demo': {}})
+            action = McpAction(type='mcp_tool', id='read', tool='read_note', arguments={},
+                               capture={'note': '/content/0/text'})
+            values = {}
+            async with open_target(target, values) as client:
+                actions = await run_actions([action], client, values, 'setup')
+                check = Verifier(id='note-check', action=action,
+                                 assertions=[Predicate(path='/content/0/text', op='contains',
+                                                       value='demo printer')])
+                result = await verify([check], 'all', client, values)
+            self.assertFalse(actions.errors)
+            self.assertIn('demo printer', values['note'])
+            self.assertTrue(result.completed)
+
+    async def test_cleanup_continues_after_an_action_error(self):
+        class Client:
+            async def call_tool(self, name, arguments):
+                if name == 'bad':
+                    raise RuntimeError('broken')
+                return type('Result', (), {'model_dump': lambda self, **kwargs: {'ok': True}})()
+        actions = [McpAction(type='mcp_tool', id='bad', tool='bad'),
+                   McpAction(type='mcp_tool', id='good', tool='good')]
+        result = await run_actions(actions, Client(), {}, 'cleanup', best_effort=True)
+        self.assertEqual(len(result.records), 2)
+        self.assertEqual(result.errors[0]['phase'], 'cleanup')
 
 
 if __name__ == '__main__':
