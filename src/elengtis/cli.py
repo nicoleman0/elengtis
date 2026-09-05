@@ -1,6 +1,7 @@
 """Run a bounded synthetic matrix; every trial has a fresh fixture process."""
 import argparse
 import asyncio
+from collections import Counter
 from datetime import datetime, timezone, timedelta
 import hashlib
 from importlib import import_module
@@ -35,6 +36,7 @@ ENGINES = {'reference': ('reference', 'run_episode'), 'graph': ('graph', 'run_ep
            'create_agent': ('adapters', 'run_agent_episode')}
 PACKAGES = ('mcp', 'langchain', 'langchain-core', 'langgraph', 'langchain-mcp-adapters',
             'langchain-openrouter')
+RESUME_CONFLICTS = ('config', 'policies', 'trials', 'step_budget', 'engine', 'model')
 
 
 def live_provider(model):
@@ -104,24 +106,84 @@ def provenance():
             'lock_sha256': hashlib.sha256(lock.read_bytes()).hexdigest() if lock.exists() else None}
 
 
-async def run_matrix(config, out):
+def source_drift(out):
+    """Warn in the readable summary when attempts did not all run the same code."""
+    manifest = json.loads((out / 'manifest.json').read_text())
+    original = manifest['environment']['source_sha256']
+    if any(entry['environment']['source_sha256'] != original
+           for entry in manifest.get('resumes', [])):
+        return ['NOTE: sources changed between attempts; see manifest.json resumes']
+    return []
+
+
+def load_resume(out, args):
+    """Read a matrix's own manifest and rows, and record this resumption in the manifest."""
+    supplied = [f'--{name.replace("_", "-")}' for name in RESUME_CONFLICTS
+                if getattr(args, name) is not None]
+    if supplied:
+        raise ValueError('--resume takes its configuration from the manifest; '
+                         f'remove {" ".join(supplied)}')
+    manifest_path, rows_path = out / 'manifest.json', out / 'runs.jsonl'
+    if not manifest_path.exists() or not rows_path.exists():
+        raise ValueError(f'{out} has no manifest.json and runs.jsonl to resume')
+    manifest = json.loads(manifest_path.read_text())
+    for key, current in (('schema_version', SCHEMA_VERSION), ('metrics_version', METRICS_VERSION)):
+        if manifest.get(key) != current:
+            raise ValueError(f'{key} is {manifest.get(key)} but this build writes {current}; '
+                             'resuming would mix rows that do not mean the same thing')
+    manifest.setdefault('resumes', []).append(
+        {'resumed_at': datetime.now(timezone.utc).isoformat(), 'environment': provenance()})
+    manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+    rows = [json.loads(line) for line in rows_path.read_text().splitlines() if line.strip()]
+    return manifest['config'], manifest['run_id'], rows
+
+
+def write_summary(config, out, attempts, resuming):
+    """Readable counts over one result per trial; a retry replaces an attempt, never adds a trial."""
+    latest = {row['trial_id']: row for row in attempts if row['evidence_status'] == 'complete'}
+    results, live = list(latest.values()), config['model']
+    summary = '\n'.join([
+        f'Synthetic scenario via the {config["engine"]} engine, model {live or "scripted"}.'
+        + ('' if live else ' These are not model resistance estimates.'),
+        f'trials: {len(results)}',
+        *[f'{metric}: {sum(bool(row[metric]) for row in results)}/{len(results)}'
+          for metric in ('proposed', 'completed', 'proposed_not_completed')],
+        f'trials with errors: {sum(bool(row["errors"]) for row in results)}/{len(results)}',
+        *([f'attempts: {len(attempts)}, of which {len(attempts) - len(results)} were retried']
+          if len(attempts) > len(results) else []),
+        *(source_drift(out) if resuming else []),
+        *[f'{row["trial_id"]}: {row["termination"]}' for row in results]])
+    (out / 'summary.txt').write_text(summary + '\n')
+    print(summary)
+
+
+async def run_matrix(config, out, run_id=None, prior=()):
+    """Run every trial not already completed in `prior`; a given run_id means resuming."""
     run_episode = resolve_engine(config['engine'])
     live = config['model']
     deadline = LIVE_TRIAL_TIMEOUT_SECONDS if live else TRIAL_TIMEOUT_SECONDS
-    run_id = str(uuid.uuid4())
-    metadata = {'schema_version': SCHEMA_VERSION, 'metrics_version': METRICS_VERSION, 'run_id': run_id,
-                'started_at': datetime.now(timezone.utc).isoformat(),
-                'config': config, 'environment': provenance(),
-                'scenario': SCENARIO_ID, 'provider': live or 'scripted',
-                'sampling': 'provider defaults' if live else None,
-                'request_timeout_seconds': REQUEST_TIMEOUT_SECONDS,
-                'trial_timeout_seconds': deadline}
-    (out / 'manifest.json').write_text(json.dumps(metadata, indent=2) + '\n')
+    resuming = run_id is not None
+    run_id = run_id or str(uuid.uuid4())
+    done = {row['trial_id'] for row in prior if row['evidence_status'] == 'complete'}
+    attempts = Counter(row['trial_id'] for row in prior)
+    if not resuming:
+        metadata = {'schema_version': SCHEMA_VERSION, 'metrics_version': METRICS_VERSION, 'run_id': run_id,
+                    'started_at': datetime.now(timezone.utc).isoformat(),
+                    'config': config, 'environment': provenance(),
+                    'scenario': SCENARIO_ID, 'provider': live or 'scripted',
+                    'sampling': 'provider defaults' if live else None,
+                    'request_timeout_seconds': REQUEST_TIMEOUT_SECONDS,
+                    'trial_timeout_seconds': deadline}
+        (out / 'manifest.json').write_text(json.dumps(metadata, indent=2) + '\n')
     rows = []
-    with (out / 'runs.jsonl').open('x') as stream:
+    with (out / 'runs.jsonl').open('a' if resuming else 'x') as stream:
         for policy in config['policies']:
             for trial in range(config['trials']):
                 trial_id = f'{policy}-{trial}'
+                if trial_id in done:
+                    continue
+                # A retry must not overwrite the evidence explaining the failed attempt.
+                suffix = f'.retry-{attempts[trial_id]}' if attempts[trial_id] else ''
                 row = {'schema_version': SCHEMA_VERSION, 'metrics_version': METRICS_VERSION, 'run_id': run_id,
                        'trial_id': trial_id, 'attempt_id': str(uuid.uuid4()),
                        'engine': config['engine'], 'policy': policy, 'trial': trial,
@@ -135,7 +197,7 @@ async def run_matrix(config, out):
                     # Only the bundled, trusted fixture is launched. No user commands.
                     failure = None
                     try:
-                        with (out / f'{trial_id}.stderr.log').open('w') as log:
+                        with (out / f'{trial_id}{suffix}.stderr.log').open('w') as log:
                             async with asyncio.timeout(deadline):
                                 async with stdio_client(params, errlog=log) as (read, write):
                                     async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=REQUEST_TIMEOUT_SECONDS)) as client:
@@ -151,17 +213,24 @@ async def run_matrix(config, out):
                         while any(isinstance(e, BaseExceptionGroup) for e in leaves):
                             leaves = [child for e in leaves for child in
                                       (e.exceptions if isinstance(e, BaseExceptionGroup) else [e])]
+                        # A Ctrl-C mid-trial kills the fixture first, so anyio reports the
+                        # resulting transport error and the interrupt is not recoverable here.
+                        # Installing a SIGINT handler to catch it disables asyncio's own
+                        # cancellation and stops Ctrl-C aborting the matrix at all.
                         reason = ('interrupted' if any(isinstance(e, (KeyboardInterrupt, asyncio.CancelledError)) for e in leaves)
                                   else 'timeout' if any(isinstance(e, TimeoutError) for e in leaves)
                                   else 'infrastructure_error')
                         metrics = {key: None for key in ('proposed', 'completed', 'proposed_not_completed',
                                                         'recovery', 'steps_to_propose', 'model_turns', 'tool_calls')}
-                        metrics.update(termination=reason, errors=[{'kind': reason, 'detail': str(e)} for e in leaves])
+                        # Some transport exceptions carry no message; keep the type.
+                        metrics.update(termination=reason,
+                                       errors=[{'kind': reason, 'detail': f'{type(e).__name__}: {e}'}
+                                               for e in leaves])
                         evidence = {'failure': ''.join(traceback.format_exception(exc)),
                                     'collector_raw': collector.read_text() if collector.exists() else ''}
                     row['evidence_status'] = 'incomplete' if failure else 'complete'
                     row.update(metrics)
-                    row['evidence'] = f'{trial_id}.json'
+                    row['evidence'] = f'{trial_id}{suffix}.json'
                     (out / row['evidence']).write_text(json.dumps(evidence, indent=2) + '\n')
                 row['finished_at'] = datetime.now(timezone.utc).isoformat()
                 stream.write(json.dumps(row) + '\n')
@@ -171,17 +240,7 @@ async def run_matrix(config, out):
                     if isinstance(failure, (KeyboardInterrupt, asyncio.CancelledError)):
                         raise failure
                     raise RuntimeError(f'Trial {trial_id} failed; see its evidence') from failure
-    summary = '\n'.join([
-        f'Synthetic scenario via the {config["engine"]} engine, '
-        f'model {live or "scripted"}.'
-        + ('' if live else ' These are not model resistance estimates.'),
-        f'trials: {len(rows)}',
-        *[f'{metric}: {sum(bool(row[metric]) for row in rows)}/{len(rows)}'
-          for metric in ('proposed', 'completed', 'proposed_not_completed')],
-        f'trials with errors: {sum(bool(row["errors"]) for row in rows)}/{len(rows)}',
-        *[f'{row["trial_id"]}: {row["termination"]}' for row in rows]])
-    (out / 'summary.txt').write_text(summary + '\n')
-    print(summary)
+    write_summary(config, out, [*prior, *rows], resuming)
 
 
 def main():
@@ -192,18 +251,25 @@ def main():
     parser.add_argument('--policies', nargs='+', choices=POLICIES, help='Policies to run (overrides config)')
     parser.add_argument('--engine', choices=tuple(ENGINES), help='Execution engine (overrides config)')
     parser.add_argument('--model', help='OpenRouter model id for a live run, replacing the scripted policies')
-    parser.add_argument('--out', type=Path, required=True, help='New output directory (never overwritten)')
+    parser.add_argument('--resume', action='store_true',
+                        help='Continue an interrupted matrix in --out, skipping completed trials')
+    parser.add_argument('--out', type=Path, required=True,
+                        help='Output directory; new and never overwritten unless --resume')
     args = parser.parse_args()
+    run_id, prior = None, ()
     try:
-        config = load_config(args.config, step_budget=args.step_budget, trials=args.trials,
-                             policies=args.policies, engine=args.engine, model=args.model)
-        args.out.mkdir(parents=True, exist_ok=False)
-    except (ValueError, OSError) as exc:
+        if args.resume:
+            config, run_id, prior = load_resume(args.out, args)
+        else:
+            config = load_config(args.config, step_budget=args.step_budget, trials=args.trials,
+                                 policies=args.policies, engine=args.engine, model=args.model)
+            args.out.mkdir(parents=True, exist_ok=False)
+    except (ValueError, OSError, KeyError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
     try:
-        asyncio.run(run_matrix(config, args.out))
+        asyncio.run(run_matrix(config, args.out, run_id, prior))
     except KeyboardInterrupt:
-        parser.exit(130, 'Interrupted; partial output retained. Resume is not implemented.\n')
+        parser.exit(130, 'Interrupted; partial output retained. Continue with --resume.\n')
     except Exception as exc:  # pylint: disable=broad-exception-caught
         # Report unhandled run failures at the CLI boundary with a nonzero exit.
-        parser.exit(1, f'Run failed: {exc}. Partial output retained.\n')
+        parser.exit(1, f'Run failed: {exc}. Partial output retained; continue with --resume.\n')
