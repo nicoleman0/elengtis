@@ -94,6 +94,8 @@ class AnalysisTests(unittest.TestCase):
             self.assertEqual(checked.returncode, 0, checked.stderr)
             plan = json.loads((out / 'run-order.json').read_text())
             self.assertEqual((len(plan['runs']), plan['max_model_calls']), (24, 96))
+            self.assertEqual(plan['schema_version'], 3)
+            self.assertEqual(plan['engines'], ['reference', 'graph', 'langchain', 'create_agent'])
             env = dict(__import__('os').environ, OPENROUTER_API_KEY='test-key')
             preflight = subprocess.run([sys.executable, str(ROOT / 'experiments/live-comparison/run_pilot.py'),
                                         '--plan', str(out / 'run-order.json'), '--results', str(root / 'results'),
@@ -116,6 +118,46 @@ class AnalysisTests(unittest.TestCase):
                                      capture_output=True, text=True, timeout=20)
             self.assertNotEqual(retries.returncode, 0)
             self.assertIn('max_retries', retries.stderr)
+
+            focused = root / 'focused'
+            subprocess.run([sys.executable, str(ROOT / 'experiments/live-comparison/generate_live_comparison.py'),
+                            '--models', str(models), '--engines', 'graph', 'create_agent',
+                            '--experiment-id', 'live-framework-comparison-v1', '--blocks', '1',
+                            '--budget-usd', '0.15', '--out', str(focused)],
+                           check=True, capture_output=True, text=True, timeout=20)
+            focused_plan = json.loads((focused / 'run-order.json').read_text())
+            self.assertEqual(focused_plan['engines'], ['graph', 'create_agent'])
+            self.assertEqual((len(focused_plan['runs']), focused_plan['max_model_calls']), (12, 48))
+            focused_configs = sorted((focused / 'campaigns').glob('*.yaml'))
+            self.assertEqual({path.read_text().split('engine: ', 1)[1].splitlines()[0]
+                              for path in focused_configs}, {'graph', 'create_agent'})
+            focused_preflight = subprocess.run(
+                [sys.executable, str(ROOT / 'experiments/live-comparison/run_pilot.py'),
+                 '--plan', str(focused / 'run-order.json'), '--results', str(root / 'focused-results'),
+                 '--max-model-calls', '48', '--budget-usd', '0.15', '--dry-run'], env=env,
+                capture_output=True, text=True, timeout=20)
+            self.assertEqual(focused_preflight.returncode, 0, focused_preflight.stderr)
+            self.assertIn('12 cells, at most 48 model calls', focused_preflight.stdout)
+
+            duplicate_engines = subprocess.run(
+                [sys.executable, str(ROOT / 'experiments/live-comparison/generate_live_comparison.py'),
+                 '--models', str(models), '--engines', 'graph', 'graph', '--blocks', '1',
+                 '--budget-usd', '0.15', '--out', str(root / 'duplicate')],
+                capture_output=True, text=True, timeout=20)
+            self.assertNotEqual(duplicate_engines.returncode, 0)
+            self.assertIn('engines must be unique', duplicate_engines.stderr)
+
+            legacy = dict(plan)
+            legacy['schema_version'] = 2
+            legacy.pop('engines')
+            legacy.pop('experiment_id')
+            (out / 'legacy-run-order.json').write_text(json.dumps(legacy))
+            legacy_preflight = subprocess.run(
+                [sys.executable, str(ROOT / 'experiments/live-comparison/run_pilot.py'),
+                 '--plan', str(out / 'legacy-run-order.json'), '--results', str(root / 'legacy-results'),
+                 '--max-model-calls', '96', '--budget-usd', '0.15', '--dry-run'], env=env,
+                capture_output=True, text=True, timeout=20)
+            self.assertEqual(legacy_preflight.returncode, 0, legacy_preflight.stderr)
 
     def test_pairwise_comparison_stays_within_model_and_scenario(self):
         rows = [

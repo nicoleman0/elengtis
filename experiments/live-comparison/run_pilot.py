@@ -10,11 +10,19 @@ from elengtis.budget import BudgetExceeded, PilotBudget
 from elengtis.cli import load_resume, run_matrix
 from elengtis.config import load_campaign
 
+ENGINES = ('reference', 'graph', 'langchain', 'create_agent')
+LEGACY_PLAN_SCHEMA = 2
+PLAN_SCHEMA = 3
+
 
 def preflight(plan_path, max_model_calls):
     plan = json.loads(plan_path.read_text())
-    if plan.get('schema_version') != 2 or not isinstance(plan.get('runs'), list):
+    if plan.get('schema_version') not in {LEGACY_PLAN_SCHEMA, PLAN_SCHEMA} or not isinstance(plan.get('runs'), list):
         raise ValueError('invalid live-comparison plan')
+    engines = tuple(plan.get('engines', ENGINES))
+    if (not engines or len(engines) != len(set(engines)) or
+            any(engine not in ENGINES for engine in engines)):
+        raise ValueError('plan must declare a unique set of supported engines')
     if plan.get('max_model_calls', 0) > max_model_calls:
         raise ValueError(f"plan allows {plan['max_model_calls']} model calls, above the {max_model_calls} ceiling")
     if not os.environ.get('OPENROUTER_API_KEY'):
@@ -43,6 +51,8 @@ def preflight(plan_path, max_model_calls):
     for run in plan['runs']:
         if run['model_id'] not in models:
             raise ValueError(f"run references unknown model profile {run['model_id']}")
+        if run['engine'] not in engines:
+            raise ValueError(f"run references engine {run['engine']} outside the plan engine set")
         bundle = load_campaign(plan_path.parent / run['config'])
         campaign = bundle.campaign
         generation = campaign.generation
@@ -52,6 +62,8 @@ def preflight(plan_path, max_model_calls):
         if (campaign.model_id, campaign.engine, bundle.scenarios[0].id, campaign.block, campaign.order) != (
                 run['model_id'], run['engine'], run['scenario'], run['block'], run['order']):
             raise ValueError(f"campaign metadata does not match plan for {run['result']}")
+        if plan.get('experiment_id') is not None and campaign.experiment_id != plan['experiment_id']:
+            raise ValueError(f"campaign experiment does not match plan for {run['result']}")
         bundles.append(bundle)
     return plan, bundles, models
 
