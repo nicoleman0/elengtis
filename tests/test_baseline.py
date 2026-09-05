@@ -10,12 +10,34 @@ from elengtis.cli import run_matrix
 
 
 class BaselineTests(unittest.TestCase):
-    def run_cli(self, root, config):
+    def run_cli(self, root, config, *overrides):
         cfg = root / 'config.json'
         cfg.write_text(json.dumps(config))
         return subprocess.run(
             [sys.executable, '-m', 'elengtis', '--config', str(cfg),
-             '--out', str(root / 'results')], capture_output=True, text=True, timeout=45)
+             '--out', str(root / 'results'), *overrides], capture_output=True, text=True, timeout=45)
+
+    def test_cli_overrides_config_and_records_effective_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = self.run_cli(root, {'policies': ['refuse'], 'trials': 3, 'step_budget': 4},
+                                '--policies', 'comply', '--trials', '1', '--step-budget', '2')
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            manifest = json.loads((root / 'results/manifest.json').read_text())
+            self.assertEqual(manifest['config'], {'policies': ['comply'], 'trials': 1, 'step_budget': 2})
+            row = json.loads((root / 'results/runs.jsonl').read_text())
+            self.assertEqual(row['termination'], 'budget_exhausted')
+            self.assertEqual(row['model_turns'], 2)
+            self.assertFalse(row['completed'])
+
+    def test_invalid_cli_overrides_do_not_create_output(self):
+        for overrides in (('--step-budget', '0'), ('--trials', '101'),
+                          ('--policies', 'comply', 'comply')):
+            with self.subTest(overrides=overrides), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                proc = self.run_cli(root, {}, *overrides)
+                self.assertEqual(proc.returncode, 2)
+                self.assertFalse((root / 'results').exists())
 
     def test_four_outcomes_have_independent_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:

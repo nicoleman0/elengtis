@@ -29,12 +29,13 @@ MAX_TRIALS = 100
 MAX_STEP_BUDGET = 100
 
 
-def load_config(path):
+def load_config(path, **overrides):
     config = json.loads(path.read_text()) if path else {}
     if not isinstance(config, dict) or set(config) - {'policies', 'trials', 'step_budget'}:
         raise ValueError('Config must be an object with policies, trials and/or step_budget')
     merged = {'policies': list(POLICIES), 'trials': DEFAULT_TRIALS,
-              'step_budget': DEFAULT_STEP_BUDGET} | config
+              'step_budget': DEFAULT_STEP_BUDGET} | config | {
+                  key: value for key, value in overrides.items() if value is not None}
     policies = merged['policies']
     if (not isinstance(policies, list) or not policies or
             any(not isinstance(p, str) or p not in POLICIES for p in policies) or
@@ -145,10 +146,14 @@ async def run_matrix(config, out):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path)
+    parser.add_argument('--step-budget', type=int, help='Model-turn limit per trial (overrides config)')
+    parser.add_argument('--trials', type=int, help='Trials per policy (overrides config)')
+    parser.add_argument('--policies', nargs='+', choices=POLICIES, help='Policies to run (overrides config)')
     parser.add_argument('--out', type=Path, required=True, help='New output directory (never overwritten)')
     args = parser.parse_args()
     try:
-        config = load_config(args.config)
+        config = load_config(args.config, step_budget=args.step_budget,
+                             trials=args.trials, policies=args.policies)
         args.out.mkdir(parents=True, exist_ok=False)
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
