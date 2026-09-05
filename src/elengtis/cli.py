@@ -8,11 +8,12 @@ from importlib.metadata import version
 from pathlib import Path
 
 from elengtis.config import Campaign, CampaignBundle, Scenario, load_campaign, plan_trials, write_schemas
+from elengtis.budget import BudgetExceeded
 from elengtis.reference import ScriptedProvider
 from elengtis.scenario import evaluate_proposals, resolve_prompt, resolve_value, run_actions, verify
 from elengtis.transports import open_target
 
-SCHEMA_VERSION, METRICS_VERSION, MAX_CONSECUTIVE_TARGET_FAILURES = 3, 1, 3
+SCHEMA_VERSION, METRICS_VERSION, MAX_CONSECUTIVE_TARGET_FAILURES = 4, 2, 3
 ENGINES = {'reference': ('reference', 'run_episode'), 'graph': ('graph', 'run_episode'),
            'langchain': ('adapters', 'run_episode'), 'create_agent': ('adapters', 'run_agent_episode')}
 PACKAGES = ('mcp', 'pydantic', 'PyYAML', 'httpx', 'langchain', 'langchain-core', 'langgraph',
@@ -24,10 +25,22 @@ def resolve_engine(name):
     return getattr(import_module(f'elengtis.{module}'), attribute)
 
 
-def live_provider(model, generation):
+def live_provider(model, generation, budget=None):
     from langchain_openrouter import ChatOpenRouter
     from elengtis.adapters import LiveProvider
-    return LiveProvider(ChatOpenRouter(model=model, **generation))
+    return LiveProvider(ChatOpenRouter(model=model, **generation), budget)
+
+
+def usage_totals(usage):
+    totals = {key: sum(item.get(key, 0) for item in usage if item.get(key) is not None)
+              for key in ('input_tokens', 'output_tokens', 'total_tokens')}
+    costs = [item.get('cost_usd') for item in usage if item.get('cost_usd') is not None]
+    charges = [item.get('budget_charge_usd') for item in usage
+               if item.get('budget_charge_usd') is not None]
+    totals['cost_usd'] = sum(costs) if costs else None
+    totals['budget_charge_usd'] = sum(charges) if charges else None
+    totals['unknown_costs'] = sum(item.get('cost_usd') is None for item in usage)
+    return totals
 
 
 def provenance():
@@ -85,7 +98,7 @@ def write_summary(bundle, out, attempts):
     (out / 'summary.txt').write_text(summary + '\n'); print(summary)
 
 
-async def run_matrix(bundle, out, run_id=None, prior=()):
+async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
     campaign, resuming = bundle.campaign, run_id is not None
     run_id = run_id or str(uuid.uuid4())
     done = {r['trial_id'] for r in prior if r['evidence_status'] == 'complete'}
@@ -116,9 +129,12 @@ async def run_matrix(bundle, out, run_id=None, prior=()):
                 values = dict(trial.bindings) | {'canary': canary, 'trial_dir': tmp,
                                                   'collector': str(Path(tmp) / 'collector.jsonl')}
                 setup = cleanup = None
-                evidence = {'tools': [], 'requests': [], 'messages': [], 'trajectory': []}
+                evidence = {'tools': [], 'requests': [], 'messages': [], 'trajectory': [], 'usage': []}
                 errors, proposed, completed, steps, termination = [], None, None, None, 'infrastructure_error'
-                model_turns = tool_calls = None
+                usage, model_turns = [], None
+                tool_calls = None
+                budget_stopped = False
+                budget_before = budget.committed if budget else 0.0
                 try:
                     async with open_target(trial.target, values) as client:
                         setup = await run_actions(trial.scenario.setup, client, values, 'setup')
@@ -127,7 +143,7 @@ async def run_matrix(bundle, out, run_id=None, prior=()):
                             if not setup.errors:
                                 engine = resolve_engine(campaign.engine)
                                 metrics, evidence = await engine(
-                                    (live_provider(campaign.model, campaign.generation)
+                                    (live_provider(campaign.model, campaign.generation, budget)
                                      if campaign.model else ScriptedProvider('comply')),
                                     campaign.model or 'scripted/comply', client, campaign.step_budget,
                                     system_prompt=resolve_prompt(trial.scenario.exercise.system, values),
@@ -135,40 +151,68 @@ async def run_matrix(bundle, out, run_id=None, prior=()):
                                     allowed_tools=resolve_value(trial.scenario.exercise.tools, values))
                                 termination = metrics['termination']
                                 model_turns, tool_calls = metrics['model_turns'], metrics['tool_calls']
-                                proposal = evaluate_proposals(trial.scenario.proposal_rules,
-                                                              evidence['trajectory'], values)
-                                proposed, steps = proposal.proposed, proposal.steps_to_propose
-                                checked = await verify(trial.scenario.verify.checks,
-                                                       trial.scenario.verify.mode, client, values)
-                                completed = checked.completed; errors.extend(checked.errors)
-                                evidence |= {'proposal_evaluation': proposal.matches,
-                                             'verification': checked.checks}
+                                usage = metrics.get('usage', [])
+                                errors.extend(metrics.get('errors', []))
+                                if termination not in {'provider_error', 'budget_exhausted'}:
+                                    proposal = evaluate_proposals(trial.scenario.proposal_rules,
+                                                                  evidence['trajectory'], values)
+                                    proposed, steps = proposal.proposed, proposal.steps_to_propose
+                                    checked = await verify(trial.scenario.verify.checks,
+                                                           trial.scenario.verify.mode, client, values)
+                                    completed = checked.completed; errors.extend(checked.errors)
+                                    evidence |= {'proposal_evaluation': proposal.matches,
+                                                 'verification': checked.checks}
+                        except BudgetExceeded as exc:
+                            termination = 'budget_exhausted'
+                            budget_stopped = True
+                            errors.append({'kind': 'budget_exceeded', 'detail': str(exc)})
+                            evidence['traceback'] = traceback.format_exc()
                         finally:
                             cleanup = await run_actions(trial.scenario.cleanup, client, values,
                                                         'cleanup', best_effort=True)
                             errors.extend(cleanup.errors)
+                except BudgetExceeded as exc:
+                    termination = 'budget_exhausted'
+                    budget_stopped = True
+                    errors.append({'kind': 'budget_exceeded', 'detail': str(exc)})
                 except Exception as exc:
+                    termination = 'infrastructure_error'
                     errors.append({'phase': 'connection_or_agent', 'detail': f'{type(exc).__name__}: {exc}'})
                     evidence['traceback'] = traceback.format_exc()
+                evidence['usage'] = usage
                 document = {'schema_version': SCHEMA_VERSION, 'run_id': run_id,
                             'trial_id': trial.trial_id, 'attempt_id': attempt_id,
                             'target': trial.target.id, 'scenario': trial.scenario.id,
                             'canary': canary, 'setup': setup.records if setup else [],
-                            'cleanup': cleanup.records if cleanup else [], **evidence}
+                            'cleanup': cleanup.records if cleanup else [], **evidence, 'errors': errors}
                 (out / evidence_name).write_text(json.dumps(document, indent=2) + '\n')
-                terminal = setup is not None and not setup.errors and proposed is not None
+                fatal = (termination in {'provider_error', 'infrastructure_error', 'budget_exhausted'} or
+                         any(error.get('phase') in {'setup', 'verification', 'cleanup', 'connection_or_agent'}
+                             for error in errors))
+                terminal = (setup is not None and not setup.errors and proposed is not None and
+                            completed is not None and not fatal)
+                failure_class = None if terminal else (
+                    'provider_error' if termination == 'provider_error' else
+                    'budget_exceeded' if termination == 'budget_exhausted' else
+                    'verification_error' if any(error.get('phase') == 'verification' for error in errors)
+                    else 'infrastructure_error')
+                totals = usage_totals(usage)
+                totals['budget_charge_usd'] = ((budget.committed - budget_before) if budget
+                                               else totals['budget_charge_usd'])
                 row = {'schema_version': SCHEMA_VERSION, 'run_id': run_id, 'trial_id': trial.trial_id,
                        'attempt_id': attempt_id, 'target': trial.target.id, 'scenario': trial.scenario.id,
                        'trial_index': trial.index, 'engine': campaign.engine, 'proposed': proposed,
                        'completed': completed,
                        'model_id': campaign.model_id, 'model': campaign.model,
-                       'model_turns': model_turns, 'tool_calls': tool_calls,
+                       'model_turns': model_turns, 'tool_calls': tool_calls, 'usage': totals,
                        'proposed_not_completed': proposed and completed is False
                        if proposed is not None and completed is not None else None,
                        'steps_to_propose': steps, 'termination': termination, 'errors': errors,
-                       'evidence': evidence_name,
+                       'failure_class': failure_class, 'evidence': evidence_name,
                        'evidence_status': 'complete' if terminal else 'incomplete'}
                 stream.write(json.dumps(row) + '\n'); stream.flush(); rows.append(row); counts[trial.trial_id] += 1
+                if budget_stopped:
+                    raise BudgetExceeded('budget cap reached; partial results retained for resume')
                 if terminal:
                     target_failures[trial.target.id] = 0
                 else:

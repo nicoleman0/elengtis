@@ -25,9 +25,18 @@ def load_rows(inputs):
     for directory in inputs:
         manifest = json.loads((directory / 'manifest.json').read_text())
         attempts = [json.loads(line) for line in (directory / 'runs.jsonl').read_text().splitlines() if line]
-        latest, completed = {}, {}
+        latest, completed, attempt_counts = {}, {}, defaultdict(int)
+        attempt_usage = defaultdict(lambda: {'input_tokens': 0, 'output_tokens': 0,
+                                             'total_tokens': 0, 'cost_usd': 0.0,
+                                             'budget_charge_usd': 0.0, 'unknown_costs': 0})
         for row in attempts:
             latest[row['trial_id']] = row
+            attempt_counts[row['trial_id']] += 1
+            usage = row.get('usage', {})
+            for key in ('input_tokens', 'output_tokens', 'total_tokens', 'unknown_costs'):
+                attempt_usage[row['trial_id']][key] += usage.get(key, 0) or 0
+            for key in ('cost_usd', 'budget_charge_usd'):
+                attempt_usage[row['trial_id']][key] += usage.get(key, 0) or 0
             if row['evidence_status'] == 'complete':
                 completed[row['trial_id']] = row
         for trial_id, fallback in latest.items():
@@ -38,6 +47,9 @@ def load_rows(inputs):
             row['model_id'] = (manifest.get('experiment', {}).get('model_id')
                                or manifest.get('campaign', {}).get('model'))
             row['final_complete'] = row['evidence_status'] == 'complete'
+            row['attempts'] = attempt_counts[trial_id]
+            row['retries'] = max(0, row['attempts'] - 1)
+            row['attempt_usage'] = attempt_usage[trial_id]
             rows.append(row)
     return rows
 
@@ -52,6 +64,10 @@ def summarize(inputs):
         complete = [row for row in members if row['final_complete']]
         item = {'model_id': model_id, 'engine': engine, 'scenario': scenario, 'trials': len(members),
                 'complete_trials': len(complete), 'incomplete_trials': len(members) - len(complete)}
+        item['retries'] = sum(row.get('retries', 0) for row in members)
+        item['failure_classes'] = dict(sorted(
+            (name, sum(row.get('failure_class') == name for row in members))
+            for name in {row.get('failure_class') for row in members if row.get('failure_class')}))
         for metric in ('proposed', 'completed', 'proposed_not_completed'):
             known = [row[metric] for row in complete if row[metric] is not None]
             item[metric] = {'successes': sum(value is True for value in known),
@@ -64,6 +80,15 @@ def summarize(inputs):
             values = [row[metric] for row in complete if row.get(metric) is not None]
             item[metric] = {'mean': sum(values) / len(values) if values else None,
                             'known': len(values)}
+        usage = [row.get('attempt_usage', row.get('usage', {})) for row in members]
+        item['usage'] = {
+            'input_tokens': sum(entry.get('input_tokens', 0) for entry in usage),
+            'output_tokens': sum(entry.get('output_tokens', 0) for entry in usage),
+            'total_tokens': sum(entry.get('total_tokens', 0) for entry in usage),
+            'cost_usd': sum(entry.get('cost_usd', 0) or 0 for entry in usage),
+            'budget_charge_usd': sum(entry.get('budget_charge_usd', 0) or 0 for entry in usage),
+            'unknown_costs': sum(entry.get('unknown_costs', 0) for entry in usage),
+        }
         table.append(item)
     return table
 
@@ -106,8 +131,8 @@ def write_report(inputs, out):
     comparisons = pairwise(rows)
     (out / 'summary.json').write_text(json.dumps({'cells': table, 'comparisons': comparisons}, indent=2) + '\n')
     lines = ['# Live comparison summary', '',
-             '| Model | Engine | Scenario | Trials | Complete | Proposed | Completed | Proposed, not completed |',
-             '| --- | --- | --- | ---: | ---: | --- | --- | --- |']
+             '| Model | Engine | Scenario | Trials | Complete | Retries | Failures | Cost | Proposed | Completed | Proposed, not completed |',
+             '| --- | --- | --- | ---: | ---: | ---: | --- | ---: | --- | --- | --- |']
     for row in table:
         def cell(name):
             metric = row[name]
@@ -116,7 +141,8 @@ def write_report(inputs, out):
             if interval:
                 shown += f" ({interval[0]:.1%}-{interval[1]:.1%})"
             return shown + (f"; {metric['unknown']} unknown" if metric['unknown'] else '')
-        lines.append(f"| {row['model_id']} | {row['engine']} | {row['scenario']} | {row['trials']} | {row['complete_trials']} | {cell('proposed')} | "
+        lines.append(f"| {row['model_id']} | {row['engine']} | {row['scenario']} | {row['trials']} | {row['complete_trials']} | "
+                     f"{row['retries']} | {sum(row['failure_classes'].values())} | ${row['usage']['cost_usd']:.6f} | {cell('proposed')} | "
                      f"{cell('completed')} | {cell('proposed_not_completed')} |")
     if comparisons:
         lines.extend(['', '## Pairwise engine differences', '',

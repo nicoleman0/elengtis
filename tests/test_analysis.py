@@ -52,16 +52,21 @@ class AnalysisTests(unittest.TestCase):
             models.write_text('''models:
   - id: one
     model: openai/gpt-5-mini
+    pricing: {input_per_million: 0.02, output_per_million: 0.10}
     generation: {temperature: 0, route: fallback}
   - id: two
     model: anthropic/claude-test
+    pricing: {input_per_million: 0.05, output_per_million: 0.16}
     generation: {temperature: 0}
 ''')
             subprocess.run([sys.executable, str(ROOT / 'experiments/live-comparison/generate_live_comparison.py'),
-                            '--models', str(models), '--blocks', '1', '--out', str(out)],
+                            '--models', str(models), '--blocks', '1', '--budget-usd', '0.15', '--out', str(out)],
                            check=True, capture_output=True, text=True, timeout=20)
             configs = sorted((out / 'campaigns').glob('*.yaml'))
             self.assertEqual(len(configs), 24)
+            tool_error = next(path for path in configs if 'tool-error' in path.name)
+            self.assertIn('--scenario, tool-error', tool_error.read_text())
+            self.assertIn('Call read_note first', (out / 'scenarios' / 'tool-error.yaml').read_text())
             checked = subprocess.run([sys.executable, '-m', 'elengtis', 'validate', str(configs[0])],
                                      capture_output=True, text=True, timeout=20)
             self.assertEqual(checked.returncode, 0, checked.stderr)
@@ -70,16 +75,25 @@ class AnalysisTests(unittest.TestCase):
             env = dict(__import__('os').environ, OPENROUTER_API_KEY='test-key')
             preflight = subprocess.run([sys.executable, str(ROOT / 'experiments/live-comparison/run_pilot.py'),
                                         '--plan', str(out / 'run-order.json'), '--results', str(root / 'results'),
-                                        '--max-model-calls', '96', '--dry-run'], env=env,
+                                        '--max-model-calls', '96', '--budget-usd', '0.15', '--dry-run'], env=env,
                                        capture_output=True, text=True, timeout=20)
             self.assertEqual(preflight.returncode, 0, preflight.stderr)
             self.assertIn('24 cells, at most 96 model calls', preflight.stdout)
             capped = subprocess.run([sys.executable, str(ROOT / 'experiments/live-comparison/run_pilot.py'),
                                      '--plan', str(out / 'run-order.json'), '--results', str(root / 'results'),
-                                     '--max-model-calls', '95', '--dry-run'], env=env,
+                                     '--max-model-calls', '95', '--budget-usd', '0.15', '--dry-run'], env=env,
                                     capture_output=True, text=True, timeout=20)
             self.assertNotEqual(capped.returncode, 0)
             self.assertIn('above the 95 ceiling', capped.stderr)
+            frozen = json.loads((out / 'run-order.json').read_text())
+            frozen['models'][0]['generation']['max_retries'] = 1
+            (out / 'run-order.json').write_text(json.dumps(frozen))
+            retries = subprocess.run([sys.executable, str(ROOT / 'experiments/live-comparison/run_pilot.py'),
+                                      '--plan', str(out / 'run-order.json'), '--results', str(root / 'retry-results'),
+                                      '--max-model-calls', '96', '--budget-usd', '0.15', '--dry-run'], env=env,
+                                     capture_output=True, text=True, timeout=20)
+            self.assertNotEqual(retries.returncode, 0)
+            self.assertIn('max_retries', retries.stderr)
 
     def test_pairwise_comparison_stays_within_model_and_scenario(self):
         rows = [
