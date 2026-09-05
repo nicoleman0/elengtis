@@ -24,10 +24,10 @@ def resolve_engine(name):
     return getattr(import_module(f'elengtis.{module}'), attribute)
 
 
-def live_provider(model):
+def live_provider(model, generation):
     from langchain_openrouter import ChatOpenRouter
     from elengtis.adapters import LiveProvider
-    return LiveProvider(ChatOpenRouter(model=model))
+    return LiveProvider(ChatOpenRouter(model=model, **generation))
 
 
 def provenance():
@@ -43,6 +43,14 @@ def provenance():
             'source_sha256': {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                               for p in sorted(package.glob('*.py'))},
             'lock_sha256': hashlib.sha256(lock.read_bytes()).hexdigest() if lock.exists() else None}
+
+
+def configuration_provenance(bundle):
+    scenarios = {scenario.id: hashlib.sha256(json.dumps(
+        scenario.model_dump(mode='json', by_alias=True), sort_keys=True).encode()).hexdigest()
+                 for scenario in bundle.scenarios}
+    return {'campaign_sha256': hashlib.sha256(bundle.path.read_bytes()).hexdigest(),
+            'scenario_sha256': scenarios}
 
 
 def load_resume(out):
@@ -90,6 +98,10 @@ async def run_matrix(bundle, out, run_id=None, prior=()):
                     'run_id': run_id, 'started_at': datetime.now(timezone.utc).isoformat(),
                     'campaign': campaign.model_dump(mode='json', by_alias=True),
                     'scenarios': [s.model_dump(mode='json', by_alias=True) for s in bundle.scenarios],
+                    'configuration': configuration_provenance(bundle),
+                    'experiment': {'id': campaign.experiment_id, 'block': campaign.block,
+                                   'order': campaign.order, 'provider_route': campaign.provider_route,
+                                   'generation': campaign.generation},
                     'environment': provenance(),
                     'max_consecutive_target_failures': MAX_CONSECUTIVE_TARGET_FAILURES}
         (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
@@ -114,7 +126,8 @@ async def run_matrix(bundle, out, run_id=None, prior=()):
                             if not setup.errors:
                                 engine = resolve_engine(campaign.engine)
                                 metrics, evidence = await engine(
-                                    live_provider(campaign.model) if campaign.model else ScriptedProvider('comply'),
+                                    (live_provider(campaign.model, campaign.generation)
+                                     if campaign.model else ScriptedProvider('comply')),
                                     campaign.model or 'scripted/comply', client, campaign.step_budget,
                                     system_prompt=resolve_prompt(trial.scenario.exercise.system, values),
                                     user_prompt=resolve_prompt(trial.scenario.exercise.user, values),
@@ -170,6 +183,8 @@ def build_parser():
     commands = parser.add_subparsers(dest='command', required=True)
     check = commands.add_parser('validate'); check.add_argument('config', type=Path)
     schema = commands.add_parser('schema'); schema.add_argument('--out', type=Path, required=True)
+    analyze = commands.add_parser('analyze'); analyze.add_argument('--input', type=Path, action='append', required=True)
+    analyze.add_argument('--out', type=Path, required=True)
     run = commands.add_parser('run'); run.add_argument('--config', type=Path); run.add_argument('--out', type=Path, required=True)
     run.add_argument('--resume', action='store_true'); run.add_argument('--trials', type=int)
     run.add_argument('--step-budget', type=int); run.add_argument('--engine', choices=tuple(ENGINES)); run.add_argument('--model')
@@ -185,6 +200,9 @@ def main():
     args = parser.parse_args(argv)
     try:
         if args.command == 'schema': write_schemas(args.out); return
+        if args.command == 'analyze':
+            from elengtis.analysis import write_report
+            write_report(args.input, args.out); return
         if args.command == 'validate':
             print('\n'.join(t.trial_id for t in plan_trials(load_campaign(args.config)))); return
         if args.command == 'example':

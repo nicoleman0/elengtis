@@ -145,6 +145,23 @@ Completed trials are skipped. An incomplete attempt remains evidence and is
 retried from setup with a new attempt ID; retries never inflate the trial
 denominator. Result or metric version mismatches block resume.
 
+## Live orchestration comparison
+
+The live comparison uses a hosted model against the local synthetic MCP fixture;
+it is an engine-behaviour experiment, not a real-server security assessment.
+The protocol and reproducible campaign generator are in
+[`experiments/live-comparison/`](experiments/live-comparison/). Generate
+the ordered one-trial campaigns before contacting a model, retain every result
+directory, then summarize them without hiding unknown or incomplete trials:
+
+```sh
+uv run elengtis analyze --input results/block-000-reference-support-note \
+  --input results/block-000-graph-support-note --out results/analysis
+```
+
+The command writes `summary.json` and `summary.md`, including known denominators
+and Wilson intervals for the recorded proposal and completion outcomes.
+
 ## Engines
 
 `reference`, `graph`, `langchain`, and `create_agent` receive identical prompts
