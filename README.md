@@ -1,6 +1,6 @@
 # elengtis
 
-[![checks](https://github.com/nicoleman0/lg-project/actions/workflows/checks.yml/badge.svg)](https://github.com/nicoleman0/lg-project/actions/workflows/checks.yml)
+[![checks](https://github.com/nicoleman0/elengtis/actions/workflows/checks.yml/badge.svg)](https://github.com/nicoleman0/elengtis/actions/workflows/checks.yml)
 
 A synthetic MCP agent-loop benchmark baseline. It runs scripted policies through
 real MCP tool discovery and calls, then checks local artifacts to determine what
