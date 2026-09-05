@@ -3,6 +3,7 @@ import argparse
 import asyncio
 from datetime import datetime, timezone, timedelta
 import hashlib
+from importlib import import_module
 from importlib.metadata import version
 import json
 from pathlib import Path
@@ -16,10 +17,10 @@ import uuid
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from elengtis.reference import POLICIES, ScriptedProvider, run_episode
+from elengtis.reference import POLICIES, ScriptedProvider
 from elengtis.scenario import SCENARIO_ID
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 METRICS_VERSION = 1
 REQUEST_TIMEOUT_SECONDS = 10
 TRIAL_TIMEOUT_SECONDS = 30
@@ -27,14 +28,25 @@ DEFAULT_TRIALS = 1
 DEFAULT_STEP_BUDGET = 4
 MAX_TRIALS = 100
 MAX_STEP_BUDGET = 100
+DEFAULT_ENGINE = 'reference'
+ENGINES = {'reference': ('reference', 'run_episode'), 'graph': ('graph', 'run_episode'),
+           'langchain': ('adapters', 'run_episode'),
+           'create_agent': ('adapters', 'run_agent_episode')}
+PACKAGES = ('mcp', 'langchain', 'langchain-core', 'langgraph', 'langchain-mcp-adapters')
+
+
+def resolve_engine(name):
+    """Imported on demand, so the reference engine loads no framework."""
+    module, attribute = ENGINES[name]
+    return getattr(import_module(f'elengtis.{module}'), attribute)
 
 
 def load_config(path, **overrides):
     config = json.loads(path.read_text()) if path else {}
-    if not isinstance(config, dict) or set(config) - {'policies', 'trials', 'step_budget'}:
-        raise ValueError('Config must be an object with policies, trials and/or step_budget')
+    if not isinstance(config, dict) or set(config) - {'policies', 'trials', 'step_budget', 'engine'}:
+        raise ValueError('Config must be an object with policies, trials, step_budget and/or engine')
     merged = {'policies': list(POLICIES), 'trials': DEFAULT_TRIALS,
-              'step_budget': DEFAULT_STEP_BUDGET} | config | {
+              'step_budget': DEFAULT_STEP_BUDGET, 'engine': DEFAULT_ENGINE} | config | {
                   key: value for key, value in overrides.items() if value is not None}
     policies = merged['policies']
     if (not isinstance(policies, list) or not policies or
@@ -44,6 +56,8 @@ def load_config(path, **overrides):
     for key, limit in (('trials', MAX_TRIALS), ('step_budget', MAX_STEP_BUDGET)):
         if type(merged[key]) is not int or not 1 <= merged[key] <= limit:
             raise ValueError(f'{key} must be an integer from 1 to {limit}')
+    if merged['engine'] not in ENGINES:
+        raise ValueError(f'engine must be one of {tuple(ENGINES)}')
     return merged
 
 
@@ -64,13 +78,15 @@ def provenance():
             dirty = bool(status.stdout) if status.returncode == 0 else None
     lock = root / 'uv.lock'
     return {'python': platform.python_version(), 'platform': platform.platform(),
-            'package_version': version('elengtis'), 'mcp_version': version('mcp'),
+            'package_version': version('elengtis'),
+            'package_versions': {name: version(name) for name in PACKAGES},
             'code_revision': revision, 'working_tree_dirty': dirty,
             'source_sha256': hashes,
             'lock_sha256': hashlib.sha256(lock.read_bytes()).hexdigest() if lock.exists() else None}
 
 
 async def run_matrix(config, out):
+    run_episode = resolve_engine(config['engine'])
     run_id = str(uuid.uuid4())
     metadata = {'schema_version': SCHEMA_VERSION, 'metrics_version': METRICS_VERSION, 'run_id': run_id,
                 'started_at': datetime.now(timezone.utc).isoformat(),
@@ -86,7 +102,7 @@ async def run_matrix(config, out):
                 trial_id = f'{policy}-{trial}'
                 row = {'schema_version': SCHEMA_VERSION, 'metrics_version': METRICS_VERSION, 'run_id': run_id,
                        'trial_id': trial_id, 'attempt_id': str(uuid.uuid4()),
-                       'policy': policy, 'trial': trial,
+                       'engine': config['engine'], 'policy': policy, 'trial': trial,
                        'started_at': datetime.now(timezone.utc).isoformat()}
                 with tempfile.TemporaryDirectory(prefix='elengtis-') as tmp:
                     collector = Path(tmp) / 'collector.jsonl'
@@ -133,7 +149,8 @@ async def run_matrix(config, out):
                         raise failure
                     raise RuntimeError(f'Trial {trial_id} failed; see its evidence') from failure
     summary = '\n'.join([
-        'Synthetic scripted baseline — these are not model resistance estimates.',
+        f'Synthetic scripted baseline via the {config["engine"]} engine — '
+        'these are not model resistance estimates.',
         f'trials: {len(rows)}',
         *[f'{metric}: {sum(bool(row[metric]) for row in rows)}/{len(rows)}'
           for metric in ('proposed', 'completed', 'proposed_not_completed')],
@@ -149,11 +166,12 @@ def main():
     parser.add_argument('--step-budget', type=int, help='Model-turn limit per trial (overrides config)')
     parser.add_argument('--trials', type=int, help='Trials per policy (overrides config)')
     parser.add_argument('--policies', nargs='+', choices=POLICIES, help='Policies to run (overrides config)')
+    parser.add_argument('--engine', choices=tuple(ENGINES), help='Execution engine (overrides config)')
     parser.add_argument('--out', type=Path, required=True, help='New output directory (never overwritten)')
     args = parser.parse_args()
     try:
-        config = load_config(args.config, step_budget=args.step_budget,
-                             trials=args.trials, policies=args.policies)
+        config = load_config(args.config, step_budget=args.step_budget, trials=args.trials,
+                             policies=args.policies, engine=args.engine)
         args.out.mkdir(parents=True, exist_ok=False)
     except (ValueError, OSError) as exc:
         parser.error(str(exc))

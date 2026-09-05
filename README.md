@@ -88,7 +88,8 @@ The JSON object accepts only these fields; omitted fields take the defaults:
 {
   "policies": ["comply", "refuse", "tool_error", "budget"],
   "trials": 1,
-  "step_budget": 4
+  "step_budget": 4,
+  "engine": "reference"
 }
 ```
 
@@ -98,22 +99,63 @@ a 30-second trial deadline. Repeating a deterministic policy repeats a plumbing
 check; it does not add evidence about real models. No retries or resume are
 implemented yet.
 
+## Execution engines
+
+The same scenario, policies and scoring run through four interchangeable
+orchestrations, selected with `--engine` (default `reference`):
+
+| Engine | Orchestration | Model and tools |
+| --- | --- | --- |
+| `reference` | the explicit loop in `reference.py` | raw MCP SDK session |
+| `graph` | a LangGraph `StateGraph` in `graph.py` | raw MCP SDK session |
+| `langchain` | the same `StateGraph` | LangChain chat model, `langchain-mcp-adapters` tools |
+| `create_agent` | LangChain's prebuilt agent | LangChain chat model, `langchain-mcp-adapters` tools |
+
+```sh
+uv run --offline elengtis --engine graph --out results/graph
+```
+
+All four produce identical `runs.jsonl` rows for the bundled policies once generated
+identifiers and timestamps are removed. That is a plumbing result about orchestration,
+not a claim about live model behavior.
+
+### Framework behavior that had to be handled
+
+A framework default that changes behavior is an experimental condition, not an
+invisible replacement for the baseline. `tests/test_adapters.py` pins each of these.
+
+| Behavior | Baseline | Framework | Resolution |
+| --- | --- | --- | --- |
+| MCP `isError` result | recorded as a tool error, returned to the model as `ERROR: …` content | `langchain-mcp-adapters` raises `ToolException`; LangGraph's default tool-error handling re-raises it and would abort the episode | `handle_tool_error` on the adapted tools (`langchain`), `ToolErrorMiddleware` (`create_agent`) |
+| Model-turn budget | `for step in range(step_budget)` | `create_agent` has none | `ModelCallLimitMiddleware(run_limit=…, exit_behavior='end')`, which also appends an assistant message the model never produced |
+| Several calls in one turn | sequential | `ToolNode` dispatches with `asyncio.gather` | unresolved: `create_agent` runs a turn's calls concurrently. Output order is preserved, execution order is not |
+| Tool schemas | the server's JSON Schema verbatim | `convert_to_openai_tool` drops every `title` | recorded, not patched |
+| Unknown tool name | forwarded to the server, whose error comes back | resolved against a client-side registry and rejected locally | recorded; the error text differs |
+| System prompt | a message in the transcript | `create_agent` keeps it out of message state and applies it per request | recorded |
+
+The `create_agent` path is therefore an aligned comparison, not a drop-in
+replacement. Choosing the primary implementation is deferred until a live
+comparison exists; the benchmark's need for explicit control currently favors the
+`graph` engine, which reproduces the baseline without alignment knobs.
+
 ## Results and evidence
 
 Each output directory contains:
 
 - `manifest.json`: resolved configuration, run ID, timestamps, Python/platform,
-  package and MCP versions, source hashes, and checkout revision/dirty status and
+  package and framework versions, source hashes, and checkout revision/dirty status and
   lockfile hash when available. Source hashes identify uncommitted implementations;
   Git revision alone does not. A wheel installation may have no checkout metadata.
 - `runs.jsonl`: one row per finished or explicitly failed trial attempt, linked to
-  its run, trial and attempt IDs and evidence file.
+  its run, trial and attempt IDs, its engine and its evidence file.
 - `<policy>-<trial>.json`: complete model requests, messages, tool schemas,
   tool-call results and a copy of collector records. Nothing is truncated.
 - `<policy>-<trial>.stderr.log`: MCP server diagnostics.
 - `summary.txt`: readable counts and termination reasons after a completed matrix.
 
-Result schema and metric definitions are both version **1**:
+The result schema is version **2** (adding `engine` to each row, and replacing the
+manifest's `mcp_version` with `package_versions`); metric definitions remain version
+**1**, because no metric changed meaning:
 
 | Field | Meaning |
 | --- | --- |
@@ -140,20 +182,27 @@ any future custom scenario results.
 
 ## Implementation decisions
 
-- `src/elengtis/reference.py` keeps the model–tool loop explicit for a later
-  LangGraph comparison. It retains sequential dispatch, turn budgets and final
-  artifact scoring from the research loop's design, with full evidence and
-  corrected metric labels. This is not an exact historical-results reproduction.
+- `src/elengtis/reference.py` keeps the model–tool loop explicit as the comparison
+  baseline. It retains sequential dispatch, turn budgets and final artifact scoring
+  from the research loop's design, with full evidence and corrected metric labels.
+  This is not an exact historical-results reproduction.
+- `src/elengtis/graph.py` is the LangGraph port. Its model and tool bindings come
+  from the runtime context rather than being built in, so the `langchain` engine
+  reuses the same graph and any difference is attributable to the bindings.
+- `src/elengtis/adapters.py` holds the LangChain message conversions, the scripted
+  chat model and the `create_agent` path. One policy definition drives every engine.
 - `src/elengtis/server.py` defines the independent synthetic fixture.
-- `src/elengtis/scenario.py` shares the scenario identity and demo credential
-  between the server and scorer. Runner defaults, limits, format versions and
+- `src/elengtis/scenario.py` shares the scenario identity, demo credential and
+  completion scoring across the server and every engine. Runner defaults, limits, format versions and
   timeouts are named constants in `cli.py`; timeouts also populate the manifest.
 - `src/elengtis/cli.py` owns configuration, subprocess lifecycle and result files.
 - The official [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
   provides transport and schema validation instead of maintaining a partial
   protocol implementation. `uv.lock` pins the tested dependency set.
-- Tests use the standard library's `unittest`; there are no test-framework or
-  LangChain dependencies at this stage. Live providers, framework ports, general
+- Tests use the standard library's `unittest`; there is no test-framework
+  dependency. `tests/test_graph.py` and `tests/test_adapters.py` are differential:
+  each runs an engine and the reference over separate live MCP sessions and compares
+  requests, messages, ordering, errors and outcomes. Live providers, general
   scenario loading, cloud deployment and publication are later work.
 
 To inspect a worked result, start with `summary.txt`, find the `comply-0` row in
