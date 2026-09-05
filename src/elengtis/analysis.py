@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import math
+import random
+from itertools import combinations
 from collections import defaultdict
 from pathlib import Path
 
@@ -33,6 +35,8 @@ def load_rows(inputs):
             row = dict(row)
             row['block'] = manifest.get('experiment', {}).get('block')
             row['order'] = manifest.get('experiment', {}).get('order')
+            row['model_id'] = (manifest.get('experiment', {}).get('model_id')
+                               or manifest.get('campaign', {}).get('model'))
             row['final_complete'] = row['evidence_status'] == 'complete'
             rows.append(row)
     return rows
@@ -42,11 +46,11 @@ def summarize(inputs):
     rows = load_rows(inputs)
     groups = defaultdict(list)
     for row in rows:
-        groups[(row['engine'], row['scenario'])].append(row)
+        groups[(row['model_id'], row['engine'], row['scenario'])].append(row)
     table = []
-    for (engine, scenario), members in sorted(groups.items()):
+    for (model_id, engine, scenario), members in sorted(groups.items()):
         complete = [row for row in members if row['final_complete']]
-        item = {'engine': engine, 'scenario': scenario, 'trials': len(members),
+        item = {'model_id': model_id, 'engine': engine, 'scenario': scenario, 'trials': len(members),
                 'complete_trials': len(complete), 'incomplete_trials': len(members) - len(complete)}
         for metric in ('proposed', 'completed', 'proposed_not_completed'):
             known = [row[metric] for row in complete if row[metric] is not None]
@@ -56,18 +60,54 @@ def summarize(inputs):
         item['terminations'] = dict(sorted(
             ((name, sum(row['termination'] == name for row in members))
              for name in {row['termination'] for row in members})))
+        for metric in ('model_turns', 'tool_calls', 'steps_to_propose'):
+            values = [row[metric] for row in complete if row.get(metric) is not None]
+            item[metric] = {'mean': sum(values) / len(values) if values else None,
+                            'known': len(values)}
         table.append(item)
     return table
+
+
+def pairwise(rows, samples=2000):
+    """Estimate within-block engine differences without pooling distinct models."""
+    grouped = defaultdict(list)
+    for row in rows:
+        if row['final_complete'] and row['block'] is not None:
+            grouped[(row['model_id'], row['scenario'])].append(row)
+    results = []
+    for (model_id, scenario), members in sorted(grouped.items()):
+        by_engine_block = defaultdict(dict)
+        for row in members:
+            by_engine_block[row['engine']][row['block']] = row
+        for left, right in combinations(sorted(by_engine_block), 2):
+            for metric in ('proposed', 'completed', 'proposed_not_completed'):
+                differences = []
+                for block in sorted(set(by_engine_block[left]) & set(by_engine_block[right])):
+                    first, second = by_engine_block[left][block][metric], by_engine_block[right][block][metric]
+                    if first is not None and second is not None:
+                        differences.append(int(second) - int(first))
+                if not differences:
+                    continue
+                randomizer = random.Random(f'{model_id}:{scenario}:{left}:{right}:{metric}')
+                estimates = sorted(sum(randomizer.choice(differences) for _ in differences) / len(differences)
+                                   for _ in range(samples))
+                results.append({'model_id': model_id, 'scenario': scenario, 'metric': metric,
+                                'left_engine': left, 'right_engine': right, 'blocks': len(differences),
+                                'difference_pp': 100 * sum(differences) / len(differences),
+                                'bootstrap_95': [100 * estimates[int(.025 * samples)],
+                                                 100 * estimates[int(.975 * samples) - 1]]})
+    return results
 
 
 def write_report(inputs, out):
     """Write JSON plus a concise Markdown table for publication review."""
     out.mkdir(parents=True, exist_ok=True)
-    table = summarize(inputs)
-    (out / 'summary.json').write_text(json.dumps(table, indent=2) + '\n')
+    rows, table = load_rows(inputs), summarize(inputs)
+    comparisons = pairwise(rows)
+    (out / 'summary.json').write_text(json.dumps({'cells': table, 'comparisons': comparisons}, indent=2) + '\n')
     lines = ['# Live comparison summary', '',
-             '| Engine | Scenario | Trials | Complete | Proposed | Completed | Proposed, not completed |',
-             '| --- | --- | ---: | ---: | --- | --- | --- |']
+             '| Model | Engine | Scenario | Trials | Complete | Proposed | Completed | Proposed, not completed |',
+             '| --- | --- | --- | ---: | ---: | --- | --- | --- |']
     for row in table:
         def cell(name):
             metric = row[name]
@@ -76,7 +116,15 @@ def write_report(inputs, out):
             if interval:
                 shown += f" ({interval[0]:.1%}-{interval[1]:.1%})"
             return shown + (f"; {metric['unknown']} unknown" if metric['unknown'] else '')
-        lines.append(f"| {row['engine']} | {row['scenario']} | {row['trials']} | {row['complete_trials']} | {cell('proposed')} | "
+        lines.append(f"| {row['model_id']} | {row['engine']} | {row['scenario']} | {row['trials']} | {row['complete_trials']} | {cell('proposed')} | "
                      f"{cell('completed')} | {cell('proposed_not_completed')} |")
+    if comparisons:
+        lines.extend(['', '## Pairwise engine differences', '',
+                      '| Model | Scenario | Metric | Difference (right - left) | 95% bootstrap interval | Blocks |',
+                      '| --- | --- | --- | --- | --- | ---: |'])
+        for item in comparisons:
+            lines.append(f"| {item['model_id']} | {item['scenario']} | {item['metric']} | "
+                         f"{item['right_engine']} - {item['left_engine']}: {item['difference_pp']:.1f} pp | "
+                         f"{item['bootstrap_95'][0]:.1f} to {item['bootstrap_95'][1]:.1f} pp | {item['blocks']} |")
     (out / 'summary.md').write_text('\n'.join(lines) + '\n')
     return table

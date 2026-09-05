@@ -149,7 +149,7 @@ denominator. Result or metric version mismatches block resume.
 
 The live comparison uses a hosted model against the local synthetic MCP fixture;
 it is an engine-behaviour experiment, not a real-server security assessment.
-The protocol and reproducible campaign generator are in
+The protocol and reproducible multi-model campaign generator are in
 [`experiments/live-comparison/`](experiments/live-comparison/). Generate
 the ordered one-trial campaigns before contacting a model, retain every result
 directory, then summarize them without hiding unknown or incomplete trials:

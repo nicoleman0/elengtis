@@ -100,7 +100,7 @@ async def run_matrix(bundle, out, run_id=None, prior=()):
                     'scenarios': [s.model_dump(mode='json', by_alias=True) for s in bundle.scenarios],
                     'configuration': configuration_provenance(bundle),
                     'experiment': {'id': campaign.experiment_id, 'block': campaign.block,
-                                   'order': campaign.order, 'provider_route': campaign.provider_route,
+                                   'order': campaign.order, 'model_id': campaign.model_id,
                                    'generation': campaign.generation},
                     'environment': provenance(),
                     'max_consecutive_target_failures': MAX_CONSECUTIVE_TARGET_FAILURES}
@@ -118,6 +118,7 @@ async def run_matrix(bundle, out, run_id=None, prior=()):
                 setup = cleanup = None
                 evidence = {'tools': [], 'requests': [], 'messages': [], 'trajectory': []}
                 errors, proposed, completed, steps, termination = [], None, None, None, 'infrastructure_error'
+                model_turns = tool_calls = None
                 try:
                     async with open_target(trial.target, values) as client:
                         setup = await run_actions(trial.scenario.setup, client, values, 'setup')
@@ -133,6 +134,7 @@ async def run_matrix(bundle, out, run_id=None, prior=()):
                                     user_prompt=resolve_prompt(trial.scenario.exercise.user, values),
                                     allowed_tools=resolve_value(trial.scenario.exercise.tools, values))
                                 termination = metrics['termination']
+                                model_turns, tool_calls = metrics['model_turns'], metrics['tool_calls']
                                 proposal = evaluate_proposals(trial.scenario.proposal_rules,
                                                               evidence['trajectory'], values)
                                 proposed, steps = proposal.proposed, proposal.steps_to_propose
@@ -159,6 +161,8 @@ async def run_matrix(bundle, out, run_id=None, prior=()):
                        'attempt_id': attempt_id, 'target': trial.target.id, 'scenario': trial.scenario.id,
                        'trial_index': trial.index, 'engine': campaign.engine, 'proposed': proposed,
                        'completed': completed,
+                       'model_id': campaign.model_id, 'model': campaign.model,
+                       'model_turns': model_turns, 'tool_calls': tool_calls,
                        'proposed_not_completed': proposed and completed is False
                        if proposed is not None and completed is not None else None,
                        'steps_to_propose': steps, 'termination': termination, 'errors': errors,

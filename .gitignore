@@ -5,4 +5,4 @@ __pycache__/
 dist/
 results/
 .env
-experiments/live-comparison/generated/
+experiments/live-comparison/results/

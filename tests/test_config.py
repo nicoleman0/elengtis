@@ -104,6 +104,27 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'positive example'):
                     load_campaign(campaign)
 
+    def test_rejects_unknown_or_model_free_generation_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            campaign = self.files(root)
+            with patch.dict(os.environ, {'TEST_MCP_TOKEN': 'secret'}):
+                campaign.write_text(CAMPAIGN.replace('engine: reference', 'engine: reference\ngeneration: {banana: 1}'))
+                with self.assertRaisesRegex(ValueError, 'Unsupported generation'):
+                    load_campaign(campaign)
+                campaign.write_text(CAMPAIGN.replace('engine: reference', 'engine: reference\ngeneration: {temperature: 0}'))
+                with self.assertRaisesRegex(ValueError, 'require a model'):
+                    load_campaign(campaign)
+
+    def test_legacy_provider_route_becomes_the_live_generation_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            campaign = self.files(root)
+            text = CAMPAIGN.replace('engine: reference', 'engine: reference\nmodel: openai/gpt-5-mini\nprovider_route: fallback')
+            campaign.write_text(text)
+            with patch.dict(os.environ, {'TEST_MCP_TOKEN': 'secret'}):
+                self.assertEqual(load_campaign(campaign).campaign.generation['route'], 'fallback')
+
 
 if __name__ == '__main__':
     unittest.main()
