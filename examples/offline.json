@@ -1,5 +1,0 @@
-{
-  "policies": ["comply", "refuse", "tool_error", "budget"],
-  "trials": 1,
-  "step_budget": 4
-}

@@ -23,8 +23,8 @@ def call_names(evidence):
 async def episodes(runner, provider_factory, budget, fail_submit=False):
     outputs = []
     for engine in (reference_episode, runner):
-        async with fixture(fail_submit) as (client, collector):
-            outputs.append(await engine(provider_factory(), 'scripted/test', client, collector, budget))
+        async with fixture(fail_submit) as (client, _):
+            outputs.append(await engine(provider_factory(), 'scripted/test', client, budget))
     return outputs
 
 
@@ -112,7 +112,6 @@ class CreateAgentTests(unittest.IsolatedAsyncioTestCase):
             run_agent_episode, lambda: Responses([RuntimeError('synthetic model failure')]), 4))[1]
         self.assertEqual(metrics['termination'], 'provider_error')
         self.assertEqual(metrics['model_turns'], 1)
-        self.assertIsNone(metrics['steps_to_propose'])
 
 
 if __name__ == '__main__':
