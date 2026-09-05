@@ -66,11 +66,28 @@ def to_langchain(messages):
     return converted
 
 
-class ScriptedChatModel(BaseChatModel):
-    """The reference scripted policies behind LangChain's chat model interface.
+class LiveProvider:
+    """A LangChain chat model behind the reference loop's provider interface.
 
-    Recording requests here, rather than through a callback handler, keeps the
-    comparison against the reference loop's `requests` exact.
+    Every engine drives the same live model through this, so a difference between
+    engines stays attributable to orchestration rather than to a second provider.
+    """
+
+    def __init__(self, chat):
+        self.chat = chat
+
+    async def complete(self, model, messages, tools):
+        response = await self.chat.ainvoke(to_langchain(messages), tools=tools)
+        return {'content': text_of(response),
+                'tool_calls': [{'name': call['name'], 'arguments': call['args']}
+                               for call in response.tool_calls]}
+
+
+class RecordingChatModel(BaseChatModel):
+    """A provider behind LangChain's chat model interface, recording its requests.
+
+    Recording here, rather than through a callback handler, keeps the comparison
+    against the reference loop's `requests` exact.
     """
 
     provider: Any
@@ -109,7 +126,7 @@ async def run_episode(provider, model, client, collector, step_budget):
         tool.handle_tool_error = True
     by_name = {tool.name: tool for tool in tools}
     schemas = [convert_to_openai_tool(tool) for tool in tools]
-    chat = ScriptedChatModel(provider=provider, model_name=model).bind_tools(tools)
+    chat = RecordingChatModel(provider=provider, model_name=model).bind_tools(tools)
 
     async def complete(messages):
         response = await chat.ainvoke(to_langchain(messages))
@@ -157,7 +174,7 @@ async def run_agent_episode(provider, model, client, collector, step_budget):
     Its parallel tool dispatch has no such knob and remains a recorded difference.
     """
     tools = await load_mcp_tools(client)
-    chat = ScriptedChatModel(provider=provider, model_name=model)
+    chat = RecordingChatModel(provider=provider, model_name=model)
     agent = create_agent(
         model=chat, tools=tools, system_prompt=SYSTEM,
         middleware=[ModelCallLimitMiddleware(run_limit=step_budget, exit_behavior='end'),

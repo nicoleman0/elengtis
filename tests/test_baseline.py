@@ -25,7 +25,8 @@ class BaselineTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             manifest = json.loads((root / 'results/manifest.json').read_text())
             self.assertEqual(manifest['config'], {'policies': ['comply'], 'trials': 1,
-                                                  'step_budget': 2, 'engine': 'reference'})
+                                                  'step_budget': 2, 'engine': 'reference',
+                                                  'model': None})
             row = json.loads((root / 'results/runs.jsonl').read_text())
             self.assertEqual(row['termination'], 'budget_exhausted')
             self.assertEqual(row['model_turns'], 2)
@@ -85,7 +86,8 @@ class BaselineTests(unittest.TestCase):
 
     def test_invalid_config_does_not_create_output(self):
         for config in ({'policies': ['unknown']}, {'trials': 0}, {'step_budget': True},
-                       {'engine': 'nonexistent'}, {'unrecognised': 1}):
+                       {'engine': 'nonexistent'}, {'model': ''}, {'unrecognised': 1},
+                       {'model': 'x/y', 'policies': ['comply']}):
             with self.subTest(config=config), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 proc = self.run_cli(root, config)
@@ -107,7 +109,8 @@ class FailureEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_transport_failure_is_saved_as_unknown_not_refusal(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            config = {'policies': ['comply'], 'trials': 1, 'step_budget': 4, 'engine': 'reference'}
+            config = {'policies': ['comply'], 'trials': 1, 'step_budget': 4,
+                      'engine': 'reference', 'model': None}
             with patch('elengtis.cli.resolve_engine',
                        return_value=AsyncMock(side_effect=TimeoutError('fixture deadline'))):
                 with self.assertRaises(RuntimeError):
