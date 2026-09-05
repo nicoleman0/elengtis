@@ -54,7 +54,7 @@ async def run_episode(provider, model, client, step_budget, system_prompt=SYSTEM
         for tool in discovered]
     messages = [{'role': 'system', 'content': system_prompt},
                 {'role': 'user', 'content': user_prompt}]
-    requests, trajectory, errors, usage = [], [], [], []
+    requests, trajectory, errors, usage, diagnostics = [], [], [], [], []
     termination = 'budget_exhausted'
     for step in range(step_budget):
         requests.append(deepcopy({'model': model, 'messages': messages, 'tools': tools}))
@@ -82,6 +82,7 @@ async def run_episode(provider, model, client, step_budget, system_prompt=SYSTEM
         messages.append(assistant)
         if response.get('usage'):
             usage.append(response['usage'])
+        diagnostics.append(response.get('diagnostics', {}))
         if not calls:
             termination = 'model_stop'
             break
@@ -105,6 +106,8 @@ async def run_episode(provider, model, client, step_budget, system_prompt=SYSTEM
 
     metrics = {'model_turns': len(requests),
                'tool_calls': sum(len(turn['calls']) for turn in trajectory),
-               'termination': termination, 'errors': errors, 'usage': usage}
+               'termination': termination, 'errors': errors, 'usage': usage,
+               'response_diagnostics': diagnostics}
     return metrics, {'tools': tools, 'requests': requests, 'messages': messages,
-                     'trajectory': trajectory, 'usage': usage}
+                     'trajectory': trajectory, 'usage': usage,
+                     'response_diagnostics': diagnostics}

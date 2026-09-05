@@ -77,11 +77,16 @@ def check_smoke(results, runs):
         rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
         row = next((item for item in reversed(rows) if item['evidence_status'] == 'complete'), None)
         if not row:
-            missing.append(run['result'])
+            missing.append(f"{run['result']} (no completed result)")
             continue
         evidence = json.loads((path.parent / row['evidence']).read_text())
         if not evidence.get('trajectory') or not evidence['trajectory'][0].get('calls'):
-            missing.append(run['result'])
+            diagnostic = (evidence.get('response_diagnostics') or [{}])[0]
+            missing.append(
+                f"{run['result']} (no valid first tool call; "
+                f"finish_reason={diagnostic.get('finish_reason')!r}; "
+                f"native_finish_reason={diagnostic.get('native_finish_reason')!r}; "
+                f"invalid_tool_calls={len(diagnostic.get('invalid_tool_calls', []))})")
     if missing:
         raise ValueError('smoke check found no first tool call in: ' + ', '.join(missing))
 

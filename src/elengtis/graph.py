@@ -34,6 +34,7 @@ class Episode(TypedDict):
     requests: Annotated[list, operator.add]
     errors: Annotated[list, operator.add]
     usage: Annotated[list, operator.add]
+    response_diagnostics: Annotated[list, operator.add]
     trajectory: Annotated[list, extend_turn]
     pending: list
     termination: str
@@ -76,6 +77,7 @@ async def call_model(state: Episode, runtime: Runtime[Context]):
                 'name': call['name'], 'arguments': json.dumps(call['arguments'])}}
             for call in calls]
     update = {'requests': [request], 'messages': [assistant], 'pending': calls,
+              'response_diagnostics': [response.get('diagnostics', {})],
               'trajectory': [{'step': step, 'content': content, 'calls': []}]}
     if response.get('usage'):
         update['usage'] = [response['usage']]
@@ -104,7 +106,8 @@ def call_score(state: Episode):
     return {'metrics': {'model_turns': len(state['requests']),
                         'tool_calls': sum(len(turn['calls']) for turn in state['trajectory']),
                         'termination': state['termination'], 'errors': state['errors'],
-                        'usage': state['usage']}}
+                        'usage': state['usage'],
+                        'response_diagnostics': state['response_diagnostics']}}
 
 
 def after_model(state: Episode):
@@ -135,6 +138,7 @@ async def run(context: Context):
     state = {'messages': [{'role': 'system', 'content': context.system_prompt},
                           {'role': 'user', 'content': context.user_prompt}],
              'requests': [], 'errors': [], 'usage': [], 'trajectory': [], 'pending': [],
+             'response_diagnostics': [],
              # The reference's default outcome: only model_stop or provider_error override it.
              'termination': 'budget_exhausted'}
     events, final = [], state
@@ -151,6 +155,7 @@ async def run(context: Context):
     return final['metrics'], {'tools': context.tools, 'requests': final['requests'],
                               'messages': final['messages'], 'trajectory': final['trajectory'],
                               'usage': final['usage'],
+                              'response_diagnostics': final['response_diagnostics'],
                               'graph_events': events}
 
 

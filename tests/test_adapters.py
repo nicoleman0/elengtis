@@ -1,9 +1,12 @@
 """Phase 1B: what LangChain's abstractions preserve, and what they change."""
 import unittest
 
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, LLMResult
+
 from test_graph import Responses, fixture
 
-from elengtis.adapters import run_agent_episode, run_episode as langchain_episode
+from elengtis.adapters import LiveProvider, run_agent_episode, run_episode as langchain_episode
 from elengtis.reference import POLICIES, ScriptedProvider, run_episode as reference_episode
 
 
@@ -68,6 +71,15 @@ class LangChainBindingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metrics['usage'][0]['total_tokens'], 14)
         self.assertEqual(evidence['usage'][0]['cost_usd'], 0.00001)
 
+    async def test_response_diagnostics_survive_the_adapter(self):
+        response = {'content': '', 'tool_calls': [], 'diagnostics': {
+            'finish_reason': 'stop', 'native_finish_reason': 'length',
+            'invalid_tool_calls': [{'name': 'read_note', 'args': '{', 'error': 'invalid JSON'}]}}
+        metrics, evidence = (await episodes(
+            langchain_episode, lambda: Responses([response]), 4))[1]
+        self.assertEqual(metrics['response_diagnostics'][0]['finish_reason'], 'stop')
+        self.assertEqual(evidence['response_diagnostics'][0]['invalid_tool_calls'][0]['name'], 'read_note')
+
     async def test_unknown_tool_fails_client_side_but_the_episode_continues(self):
         responses = [{'tool_calls': [{'name': 'unknown_tool', 'arguments': {}},
                                      {'name': 'read_note', 'arguments': {}}]},
@@ -115,11 +127,45 @@ class CreateAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evidence['requests'][0]['messages'][0]['role'], 'system')
         self.assertEqual(evidence['messages'][0]['role'], 'user')
 
+    async def test_response_diagnostics_survive_agent_execution(self):
+        response = {'content': '', 'tool_calls': [], 'diagnostics': {
+            'finish_reason': 'stop', 'invalid_tool_calls': [{'name': 'read_note', 'error': 'invalid JSON'}]}}
+        metrics, evidence = (await episodes(
+            run_agent_episode, lambda: Responses([response]), 4))[1]
+        self.assertEqual(metrics['response_diagnostics'][0]['finish_reason'], 'stop')
+        self.assertEqual(evidence['response_diagnostics'][0]['invalid_tool_calls'][0]['name'], 'read_note')
+
     async def test_provider_failure_is_recorded_as_an_error_not_a_refusal(self):
         metrics, _ = (await episodes(
             run_agent_episode, lambda: Responses([RuntimeError('synthetic model failure')]), 4))[1]
         self.assertEqual(metrics['termination'], 'provider_error')
         self.assertEqual(metrics['model_turns'], 1)
+
+
+class LiveProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retains_finish_reason_and_invalid_tool_calls(self):
+        class Chat:
+            max_tokens = 128
+            max_completion_tokens = None
+
+            async def agenerate(self, _messages, tools):
+                self.assert_tools = tools
+                message = AIMessage(
+                    content='', id='response-1',
+                    invalid_tool_calls=[{'id': 'bad-call', 'name': 'read_note', 'args': '{',
+                                         'error': 'invalid JSON'}],
+                    response_metadata={'provider': 'Inception', 'model_provider': 'openrouter',
+                                       'native_finish_reason': 'stop'})
+                return LLMResult(generations=[[
+                    ChatGeneration(message=message, generation_info={'finish_reason': 'tool_calls'})]])
+
+        response = await LiveProvider(Chat()).complete(
+            'inception/mercury-2.5-preview', [{'role': 'user', 'content': 'read the note'}], [])
+        diagnostics = response['diagnostics']
+        self.assertEqual(diagnostics['finish_reason'], 'tool_calls')
+        self.assertEqual(diagnostics['response_id'], 'response-1')
+        self.assertTrue(diagnostics['empty_content'])
+        self.assertEqual(diagnostics['invalid_tool_calls'][0]['error'], 'invalid JSON')
 
 
 if __name__ == '__main__':

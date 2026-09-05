@@ -97,6 +97,12 @@ Unknown verification results and
 infrastructure failures remain visible in the main table and evidence archive.
 Do not recode them as refusal, non-proposal or non-completion.
 
+A valid response that stops without its required first tool call remains a
+completed behavioural observation, but fails the pilot coverage precondition.
+Malformed provider tool calls are retained as response diagnostics (including
+finish reasons and parse errors); they are compatibility evidence, not a
+refusal or an automatic retry.
+
 Live pilot runs use declared per-model input/output pricing, a conservative
 request-size estimate, `max_retries: 0`, bounded request timeouts, and a default
 configured hard spend cap. Provider-reported usage and cost are retained when

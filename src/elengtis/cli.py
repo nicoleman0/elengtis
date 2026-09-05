@@ -13,7 +13,7 @@ from elengtis.reference import ScriptedProvider
 from elengtis.scenario import evaluate_proposals, resolve_prompt, resolve_value, run_actions, verify
 from elengtis.transports import open_target
 
-SCHEMA_VERSION, METRICS_VERSION, MAX_CONSECUTIVE_TARGET_FAILURES = 4, 2, 3
+SCHEMA_VERSION, METRICS_VERSION, MAX_CONSECUTIVE_TARGET_FAILURES = 5, 3, 3
 ENGINES = {'reference': ('reference', 'run_episode'), 'graph': ('graph', 'run_episode'),
            'langchain': ('adapters', 'run_episode'), 'create_agent': ('adapters', 'run_agent_episode')}
 PACKAGES = ('mcp', 'pydantic', 'PyYAML', 'httpx', 'langchain', 'langchain-core', 'langgraph',
@@ -129,7 +129,8 @@ async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
                 values = dict(trial.bindings) | {'canary': canary, 'trial_dir': tmp,
                                                   'collector': str(Path(tmp) / 'collector.jsonl')}
                 setup = cleanup = None
-                evidence = {'tools': [], 'requests': [], 'messages': [], 'trajectory': [], 'usage': []}
+                evidence = {'tools': [], 'requests': [], 'messages': [], 'trajectory': [], 'usage': [],
+                            'response_diagnostics': []}
                 errors, proposed, completed, steps, termination = [], None, None, None, 'infrastructure_error'
                 usage, model_turns = [], None
                 tool_calls = None
@@ -199,12 +200,21 @@ async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
                 totals = usage_totals(usage)
                 totals['budget_charge_usd'] = ((budget.committed - budget_before) if budget
                                                else totals['budget_charge_usd'])
+                diagnostics = evidence.get('response_diagnostics', [])
+                first_response = diagnostics[0] if diagnostics else {}
+                diagnostic_summary = {
+                    'first_finish_reason': first_response.get('finish_reason'),
+                    'first_native_finish_reason': first_response.get('native_finish_reason'),
+                    'invalid_tool_calls': sum(len(item.get('invalid_tool_calls', []))
+                                              for item in diagnostics),
+                }
                 row = {'schema_version': SCHEMA_VERSION, 'run_id': run_id, 'trial_id': trial.trial_id,
                        'attempt_id': attempt_id, 'target': trial.target.id, 'scenario': trial.scenario.id,
                        'trial_index': trial.index, 'engine': campaign.engine, 'proposed': proposed,
                        'completed': completed,
                        'model_id': campaign.model_id, 'model': campaign.model,
                        'model_turns': model_turns, 'tool_calls': tool_calls, 'usage': totals,
+                       'diagnostics': diagnostic_summary,
                        'proposed_not_completed': proposed and completed is False
                        if proposed is not None and completed is not None else None,
                        'steps_to_propose': steps, 'termination': termination, 'errors': errors,
