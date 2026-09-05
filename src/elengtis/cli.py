@@ -33,7 +33,8 @@ DEFAULT_ENGINE = 'reference'
 ENGINES = {'reference': ('reference', 'run_episode'), 'graph': ('graph', 'run_episode'),
            'langchain': ('adapters', 'run_episode'),
            'create_agent': ('adapters', 'run_agent_episode')}
-PACKAGES = ('mcp', 'langchain', 'langchain-core', 'langgraph', 'langchain-mcp-adapters')
+PACKAGES = ('mcp', 'langchain', 'langchain-core', 'langgraph', 'langchain-mcp-adapters',
+            'langchain-openrouter')
 
 
 def live_provider(model):

@@ -1,5 +1,7 @@
 # elengtis
 
+[![checks](https://github.com/nicoleman0/lg-project/actions/workflows/checks.yml/badge.svg)](https://github.com/nicoleman0/lg-project/actions/workflows/checks.yml)
+
 A synthetic MCP agent-loop benchmark baseline. It runs scripted policies through
 real MCP tool discovery and calls, then checks local artifacts to determine what
 completed. **It does not yet measure live model resistance or audit arbitrary
@@ -7,7 +9,8 @@ MCP servers.** The project, Python package and CLI are named `elengtis`.
 
 ## Quick start
 
-Install [uv](https://docs.astral.sh/uv/) and Python 3.12, then from this checkout:
+Not on PyPI yet; the name is available and publication waits on Phase 2. Install
+[uv](https://docs.astral.sh/uv/) and Python 3.12, then from this checkout:
 
 ```sh
 uv sync --locked
@@ -240,3 +243,29 @@ To inspect a worked result, start with `summary.txt`, find the `comply-0` row in
 injection, the next request contains the credential tool response, and the final
 collector record establishes completion. Compare with `tool_error-0.json` to see
 why a proposal without completion is not evidence of recovery.
+
+## Contributing
+
+Deterministic checks must pass without secrets, network or a model service:
+
+```sh
+uv sync --locked
+uv run --offline python -m unittest discover -s tests -v
+```
+
+CI runs exactly that, builds the package, and runs the documented example from the
+built wheel. Live runs are never part of CI.
+
+Two rules matter more than style. Keep the reference engine as the comparison
+baseline: change it only for a defect, and note the change, because deterministic
+parity across engines is what establishes port correctness. And when a framework
+default changes behavior, record it as an experimental condition with a test that
+pins it, rather than quietly matching the baseline.
+
+Scenario fixtures must be independently synthetic, with benign markers and fake
+credentials. Do not add fixtures derived from embargoed or third-party findings.
+
+## License
+
+[Apache-2.0](LICENSE). All names, payload text and fixtures are independently
+synthetic and make no claim about any third-party server or vulnerability.
