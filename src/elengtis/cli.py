@@ -3,6 +3,7 @@ import argparse
 import asyncio
 from datetime import datetime, timezone, timedelta
 import hashlib
+from importlib import import_module
 from importlib.metadata import version
 import json
 from pathlib import Path
@@ -16,25 +17,48 @@ import uuid
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from elengtis.reference import POLICIES, ScriptedProvider, run_episode
+from elengtis.reference import POLICIES, ScriptedProvider
 from elengtis.scenario import SCENARIO_ID
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 METRICS_VERSION = 1
 REQUEST_TIMEOUT_SECONDS = 10
 TRIAL_TIMEOUT_SECONDS = 30
+LIVE_TRIAL_TIMEOUT_SECONDS = 300
 DEFAULT_TRIALS = 1
 DEFAULT_STEP_BUDGET = 4
 MAX_TRIALS = 100
 MAX_STEP_BUDGET = 100
+DEFAULT_ENGINE = 'reference'
+ENGINES = {'reference': ('reference', 'run_episode'), 'graph': ('graph', 'run_episode'),
+           'langchain': ('adapters', 'run_episode'),
+           'create_agent': ('adapters', 'run_agent_episode')}
+PACKAGES = ('mcp', 'langchain', 'langchain-core', 'langgraph', 'langchain-mcp-adapters',
+            'langchain-openrouter')
+
+
+def live_provider(model):
+    """Imported on demand; the OpenRouter integration is only needed for live runs."""
+    from langchain_openrouter import ChatOpenRouter  # pylint: disable=import-outside-toplevel
+    from elengtis.adapters import LiveProvider  # pylint: disable=import-outside-toplevel
+    # Sampling parameters are left at the provider's defaults and recorded as such;
+    # some reasoning models reject an explicit temperature.
+    return LiveProvider(ChatOpenRouter(model=model))
+
+
+def resolve_engine(name):
+    """Imported on demand, so the reference engine loads no framework."""
+    module, attribute = ENGINES[name]
+    return getattr(import_module(f'elengtis.{module}'), attribute)
 
 
 def load_config(path, **overrides):
     config = json.loads(path.read_text()) if path else {}
-    if not isinstance(config, dict) or set(config) - {'policies', 'trials', 'step_budget'}:
-        raise ValueError('Config must be an object with policies, trials and/or step_budget')
-    merged = {'policies': list(POLICIES), 'trials': DEFAULT_TRIALS,
-              'step_budget': DEFAULT_STEP_BUDGET} | config | {
+    allowed = {'policies', 'trials', 'step_budget', 'engine', 'model'}
+    if not isinstance(config, dict) or set(config) - allowed:
+        raise ValueError(f'Config must be an object with fields from {sorted(allowed)}')
+    merged = {'policies': list(POLICIES), 'trials': DEFAULT_TRIALS, 'model': None,
+              'step_budget': DEFAULT_STEP_BUDGET, 'engine': DEFAULT_ENGINE} | config | {
                   key: value for key, value in overrides.items() if value is not None}
     policies = merged['policies']
     if (not isinstance(policies, list) or not policies or
@@ -44,6 +68,15 @@ def load_config(path, **overrides):
     for key, limit in (('trials', MAX_TRIALS), ('step_budget', MAX_STEP_BUDGET)):
         if type(merged[key]) is not int or not 1 <= merged[key] <= limit:
             raise ValueError(f'{key} must be an integer from 1 to {limit}')
+    if merged['engine'] not in ENGINES:
+        raise ValueError(f'engine must be one of {tuple(ENGINES)}')
+    if merged['model'] is not None:
+        if not isinstance(merged['model'], str) or not merged['model']:
+            raise ValueError('model must be a nonempty string')
+        if config.get('policies') is not None or overrides.get('policies') is not None:
+            raise ValueError('policies are scripted fixtures and cannot be combined with model')
+        # A live run has no scripted policy; trials are repeats of one live condition.
+        merged['policies'] = ['live']
     return merged
 
 
@@ -64,20 +97,25 @@ def provenance():
             dirty = bool(status.stdout) if status.returncode == 0 else None
     lock = root / 'uv.lock'
     return {'python': platform.python_version(), 'platform': platform.platform(),
-            'package_version': version('elengtis'), 'mcp_version': version('mcp'),
+            'package_version': version('elengtis'),
+            'package_versions': {name: version(name) for name in PACKAGES},
             'code_revision': revision, 'working_tree_dirty': dirty,
             'source_sha256': hashes,
             'lock_sha256': hashlib.sha256(lock.read_bytes()).hexdigest() if lock.exists() else None}
 
 
 async def run_matrix(config, out):
+    run_episode = resolve_engine(config['engine'])
+    live = config['model']
+    deadline = LIVE_TRIAL_TIMEOUT_SECONDS if live else TRIAL_TIMEOUT_SECONDS
     run_id = str(uuid.uuid4())
     metadata = {'schema_version': SCHEMA_VERSION, 'metrics_version': METRICS_VERSION, 'run_id': run_id,
                 'started_at': datetime.now(timezone.utc).isoformat(),
                 'config': config, 'environment': provenance(),
-                'scenario': SCENARIO_ID, 'provider': 'scripted',
+                'scenario': SCENARIO_ID, 'provider': live or 'scripted',
+                'sampling': 'provider defaults' if live else None,
                 'request_timeout_seconds': REQUEST_TIMEOUT_SECONDS,
-                'trial_timeout_seconds': TRIAL_TIMEOUT_SECONDS}
+                'trial_timeout_seconds': deadline}
     (out / 'manifest.json').write_text(json.dumps(metadata, indent=2) + '\n')
     rows = []
     with (out / 'runs.jsonl').open('x') as stream:
@@ -86,7 +124,7 @@ async def run_matrix(config, out):
                 trial_id = f'{policy}-{trial}'
                 row = {'schema_version': SCHEMA_VERSION, 'metrics_version': METRICS_VERSION, 'run_id': run_id,
                        'trial_id': trial_id, 'attempt_id': str(uuid.uuid4()),
-                       'policy': policy, 'trial': trial,
+                       'engine': config['engine'], 'policy': policy, 'trial': trial,
                        'started_at': datetime.now(timezone.utc).isoformat()}
                 with tempfile.TemporaryDirectory(prefix='elengtis-') as tmp:
                     collector = Path(tmp) / 'collector.jsonl'
@@ -98,12 +136,13 @@ async def run_matrix(config, out):
                     failure = None
                     try:
                         with (out / f'{trial_id}.stderr.log').open('w') as log:
-                            async with asyncio.timeout(TRIAL_TIMEOUT_SECONDS):
+                            async with asyncio.timeout(deadline):
                                 async with stdio_client(params, errlog=log) as (read, write):
                                     async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=REQUEST_TIMEOUT_SECONDS)) as client:
                                         await client.initialize()
                                         metrics, evidence = await run_episode(
-                                            ScriptedProvider(policy), f'scripted/{policy}', client,
+                                            live_provider(live) if live else ScriptedProvider(policy),
+                                            live or f'scripted/{policy}', client,
                                             collector, config['step_budget'])
                     except BaseException as exc:  # pylint: disable=broad-exception-caught
                         # Persist unknown outcomes before propagating failure/cancellation.
@@ -133,7 +172,9 @@ async def run_matrix(config, out):
                         raise failure
                     raise RuntimeError(f'Trial {trial_id} failed; see its evidence') from failure
     summary = '\n'.join([
-        'Synthetic scripted baseline — these are not model resistance estimates.',
+        f'Synthetic scenario via the {config["engine"]} engine, '
+        f'model {live or "scripted"}.'
+        + ('' if live else ' These are not model resistance estimates.'),
         f'trials: {len(rows)}',
         *[f'{metric}: {sum(bool(row[metric]) for row in rows)}/{len(rows)}'
           for metric in ('proposed', 'completed', 'proposed_not_completed')],
@@ -149,11 +190,13 @@ def main():
     parser.add_argument('--step-budget', type=int, help='Model-turn limit per trial (overrides config)')
     parser.add_argument('--trials', type=int, help='Trials per policy (overrides config)')
     parser.add_argument('--policies', nargs='+', choices=POLICIES, help='Policies to run (overrides config)')
+    parser.add_argument('--engine', choices=tuple(ENGINES), help='Execution engine (overrides config)')
+    parser.add_argument('--model', help='OpenRouter model id for a live run, replacing the scripted policies')
     parser.add_argument('--out', type=Path, required=True, help='New output directory (never overwritten)')
     args = parser.parse_args()
     try:
-        config = load_config(args.config, step_budget=args.step_budget,
-                             trials=args.trials, policies=args.policies)
+        config = load_config(args.config, step_budget=args.step_budget, trials=args.trials,
+                             policies=args.policies, engine=args.engine, model=args.model)
         args.out.mkdir(parents=True, exist_ok=False)
     except (ValueError, OSError) as exc:
         parser.error(str(exc))

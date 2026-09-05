@@ -4,9 +4,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from elengtis.cli import run_matrix
+from elengtis.cli import ENGINES, run_matrix
 
 
 class BaselineTests(unittest.TestCase):
@@ -24,7 +24,9 @@ class BaselineTests(unittest.TestCase):
                                 '--policies', 'comply', '--trials', '1', '--step-budget', '2')
             self.assertEqual(proc.returncode, 0, proc.stderr)
             manifest = json.loads((root / 'results/manifest.json').read_text())
-            self.assertEqual(manifest['config'], {'policies': ['comply'], 'trials': 1, 'step_budget': 2})
+            self.assertEqual(manifest['config'], {'policies': ['comply'], 'trials': 1,
+                                                  'step_budget': 2, 'engine': 'reference',
+                                                  'model': None})
             row = json.loads((root / 'results/runs.jsonl').read_text())
             self.assertEqual(row['termination'], 'budget_exhausted')
             self.assertEqual(row['model_turns'], 2)
@@ -57,7 +59,7 @@ class BaselineTests(unittest.TestCase):
             self.assertTrue(by_policy['budget']['proposed_not_completed'])
             for row in rows:
                 self.assertIsNone(row['recovery'])
-                self.assertEqual(row['schema_version'], 1)
+                self.assertEqual(row['schema_version'], 2)
                 evidence = json.loads((root / 'results' / row['evidence']).read_text())
                 self.assertEqual(bool(evidence['collector']), row['completed'])
                 self.assertTrue(evidence['requests'])
@@ -69,9 +71,23 @@ class BaselineTests(unittest.TestCase):
                              ['read_note', 'read_demo_credential', 'submit_demo_credential'])
             self.assertIn('completed: 1/4', proc.stdout)
 
+    def test_every_engine_runs_and_records_itself(self):
+        for engine in ENGINES:
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                proc = self.run_cli(root, {'policies': ['comply'], 'trials': 1, 'step_budget': 4},
+                                    '--engine', engine)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                manifest = json.loads((root / 'results/manifest.json').read_text())
+                self.assertEqual(manifest['config']['engine'], engine)
+                row = json.loads((root / 'results/runs.jsonl').read_text())
+                self.assertEqual(row['engine'], engine)
+                self.assertTrue(row['completed'])
+
     def test_invalid_config_does_not_create_output(self):
         for config in ({'policies': ['unknown']}, {'trials': 0}, {'step_budget': True},
-                       {'unrecognised': 1}):
+                       {'engine': 'nonexistent'}, {'model': ''}, {'unrecognised': 1},
+                       {'model': 'x/y', 'policies': ['comply']}):
             with self.subTest(config=config), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 proc = self.run_cli(root, config)
@@ -93,9 +109,12 @@ class FailureEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_transport_failure_is_saved_as_unknown_not_refusal(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            with patch('elengtis.cli.run_episode', side_effect=TimeoutError('fixture deadline')):
+            config = {'policies': ['comply'], 'trials': 1, 'step_budget': 4,
+                      'engine': 'reference', 'model': None}
+            with patch('elengtis.cli.resolve_engine',
+                       return_value=AsyncMock(side_effect=TimeoutError('fixture deadline'))):
                 with self.assertRaises(RuntimeError):
-                    await run_matrix({'policies': ['comply'], 'trials': 1, 'step_budget': 4}, root)
+                    await run_matrix(config, root)
             row = json.loads((root / 'runs.jsonl').read_text())
             self.assertEqual(row['termination'], 'timeout')
             self.assertIsNone(row['completed'])

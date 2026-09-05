@@ -1,0 +1,36 @@
+name: checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # Ubuntu only: the fixture is a stdio subprocess with no platform-specific code.
+  # Add an OS matrix if a platform bug actually appears.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to exact tags: setup-uv publishes no moving major alias above v7,
+      # and exact pins keep CI reproducible alongside the locked environment.
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install the locked environment
+        run: uv sync --locked
+
+      - name: Deterministic checks — no secrets, no live model calls
+        run: uv run python -m unittest discover -s tests -v
+
+      - name: Build the package
+        run: uv build
+
+      - name: Run the documented example from the built wheel
+        run: |
+          uv run --isolated --no-project --with dist/*.whl \
+            elengtis --engine graph --out "$RUNNER_TEMP/example"
+          grep -q 'completed: 1/4' "$RUNNER_TEMP/example/summary.txt"

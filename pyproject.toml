@@ -4,7 +4,29 @@ version = "0.1.0"
 description = "Synthetic MCP agent-loop benchmark baseline"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["mcp>=1.26,<2"]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "ncoleman" }]
+keywords = ["mcp", "prompt-injection", "benchmark", "agent-security", "langgraph"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Security",
+]
+dependencies = [
+    "langchain>=1,<2",
+    "langchain-mcp-adapters>=0.2,<0.3",
+    "langchain-openrouter>=0.1,<1",
+    "langgraph>=1,<2",
+    "mcp>=1.26,<2",
+]
+
+[project.urls]
+Repository = "https://github.com/nicoleman0/elengtis"
+Issues = "https://github.com/nicoleman0/elengtis/issues"
 
 [project.scripts]
 elengtis = "elengtis.cli:main"
