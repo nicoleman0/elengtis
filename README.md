@@ -71,6 +71,17 @@ no claim about a particular third-party server or vulnerability.
 
 ## Configuration
 
+Use CLI flags for quick experiments; a config file is optional:
+
+```sh
+uv run --offline elengtis --policies comply --step-budget 2 --out results/short-run
+uv run --offline elengtis --config examples/offline.json --trials 2 --out results/repeated
+```
+
+Precedence is **CLI flags → config file → defaults**. `--policies` accepts one
+or more names and replaces the configured list. The manifest records the
+effective configuration, including overrides. Use `elengtis --help` for options.
+
 The JSON object accepts only these fields; omitted fields take the defaults:
 
 ```json
