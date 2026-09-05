@@ -13,8 +13,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      # Pinned to exact tags: setup-uv publishes no moving major alias above v7,
+      # and exact pins keep CI reproducible alongside the locked environment.
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
 
