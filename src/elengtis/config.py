@@ -133,10 +133,28 @@ class Campaign(StrictModel):
     provider_route: str | None = None
     generation: dict[str, Any] = Field(default_factory=dict)
     experiment_id: str | None = None
+    model_id: str | None = None
     block: int | None = Field(default=None, ge=0)
     order: int | None = Field(default=None, ge=0)
     targets: list[Target] = Field(min_length=1)
     scenarios: list[str] = Field(min_length=1)
+
+    @model_validator(mode='after')
+    def valid_generation(self):
+        allowed = {'temperature', 'max_tokens', 'max_completion_tokens', 'top_p',
+                   'frequency_penalty', 'presence_penalty', 'seed', 'stop_sequences',
+                   'n', 'streaming', 'timeout', 'max_retries', 'reasoning',
+                   'openrouter_provider', 'route'}
+        unknown = set(self.generation) - allowed
+        if unknown:
+            raise ValueError(f'Unsupported generation settings {sorted(unknown)}')
+        if self.generation and not self.model:
+            raise ValueError('generation settings require a model')
+        if self.provider_route:
+            if 'route' in self.generation and self.generation['route'] != self.provider_route:
+                raise ValueError('provider_route conflicts with generation.route')
+            self.generation.setdefault('route', self.provider_route)
+        return self
 
 
 @dataclass(frozen=True)

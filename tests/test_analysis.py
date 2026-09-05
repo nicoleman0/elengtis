@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 
-from elengtis.analysis import summarize
+from elengtis.analysis import pairwise, summarize
 
 
 ROOT = Path(__file__).parent.parent
@@ -43,20 +43,57 @@ class AnalysisTests(unittest.TestCase):
                                    '--out', str(out)], capture_output=True, text=True, timeout=20)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertTrue((out / 'summary.json').exists())
-            self.assertIn('| reference | support-note |', (out / 'summary.md').read_text())
+            self.assertIn('| None | reference | support-note |', (out / 'summary.md').read_text())
 
-    def test_generator_creates_valid_randomized_cell_campaigns(self):
+    def test_generator_creates_portable_multi_model_campaigns_and_preflights_them(self):
         with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / 'generated'
+            root, out = Path(tmp), Path(tmp) / 'pilot'
+            models = root / 'models.yaml'
+            models.write_text('''models:
+  - id: one
+    model: openai/gpt-5-mini
+    generation: {temperature: 0, route: fallback}
+  - id: two
+    model: anthropic/claude-test
+    generation: {temperature: 0}
+''')
             subprocess.run([sys.executable, str(ROOT / 'experiments/live-comparison/generate_live_comparison.py'),
-                            '--model', 'openai/gpt-5-mini', '--blocks', '1', '--out', str(out)],
+                            '--models', str(models), '--blocks', '1', '--out', str(out)],
                            check=True, capture_output=True, text=True, timeout=20)
-            configs = sorted(out.glob('*.yaml'))
-            self.assertEqual(len(configs), 12)
+            configs = sorted((out / 'campaigns').glob('*.yaml'))
+            self.assertEqual(len(configs), 24)
             checked = subprocess.run([sys.executable, '-m', 'elengtis', 'validate', str(configs[0])],
                                      capture_output=True, text=True, timeout=20)
             self.assertEqual(checked.returncode, 0, checked.stderr)
-            self.assertEqual(len(json.loads((out / 'run-order.json').read_text())['runs']), 12)
+            plan = json.loads((out / 'run-order.json').read_text())
+            self.assertEqual((len(plan['runs']), plan['max_model_calls']), (24, 96))
+            env = dict(__import__('os').environ, OPENROUTER_API_KEY='test-key')
+            preflight = subprocess.run([sys.executable, str(ROOT / 'experiments/live-comparison/run_pilot.py'),
+                                        '--plan', str(out / 'run-order.json'), '--results', str(root / 'results'),
+                                        '--max-model-calls', '96', '--dry-run'], env=env,
+                                       capture_output=True, text=True, timeout=20)
+            self.assertEqual(preflight.returncode, 0, preflight.stderr)
+            self.assertIn('24 cells, at most 96 model calls', preflight.stdout)
+            capped = subprocess.run([sys.executable, str(ROOT / 'experiments/live-comparison/run_pilot.py'),
+                                     '--plan', str(out / 'run-order.json'), '--results', str(root / 'results'),
+                                     '--max-model-calls', '95', '--dry-run'], env=env,
+                                    capture_output=True, text=True, timeout=20)
+            self.assertNotEqual(capped.returncode, 0)
+            self.assertIn('above the 95 ceiling', capped.stderr)
+
+    def test_pairwise_comparison_stays_within_model_and_scenario(self):
+        rows = [
+            {'model_id': 'one', 'scenario': 'support-note', 'engine': 'graph', 'block': 0,
+             'final_complete': True, 'proposed': False, 'completed': False, 'proposed_not_completed': False},
+            {'model_id': 'one', 'scenario': 'support-note', 'engine': 'reference', 'block': 0,
+             'final_complete': True, 'proposed': True, 'completed': True, 'proposed_not_completed': False},
+            {'model_id': 'two', 'scenario': 'support-note', 'engine': 'graph', 'block': 0,
+             'final_complete': True, 'proposed': True, 'completed': True, 'proposed_not_completed': False},
+        ]
+        comparisons = pairwise(rows, samples=20)
+        completed = next(item for item in comparisons if item['metric'] == 'completed')
+        self.assertEqual((completed['model_id'], completed['blocks'], completed['difference_pp']),
+                         ('one', 1, 100.0))
 
 
 if __name__ == '__main__':
