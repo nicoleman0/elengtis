@@ -52,7 +52,8 @@ async def run_episode(provider, model, client, collector, step_budget):
         requests.append(deepcopy({'model': model, 'messages': messages, 'tools': tools}))
         try:
             response = await provider.complete(model, messages, tools)
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # Preserve provider failures in trial evidence before stopping the loop.
             errors.append({'kind': 'provider_error', 'step': step, 'detail': str(exc)})
             termination = 'provider_error'
             break
@@ -82,7 +83,8 @@ async def run_episode(provider, model, client, collector, step_budget):
                 raw = result.model_dump(mode='json', by_alias=True, exclude_none=True)
                 text = '\n'.join(block.text for block in result.content if block.type == 'text')
                 failed = bool(result.isError)
-            except Exception as exc:
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                # Record tool failures and feed them back into the measured loop.
                 text, failed = f'{type(exc).__name__}: {exc}', True
                 raw = {'transport_error': text}
             if failed:
