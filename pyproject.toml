@@ -1,7 +1,7 @@
 [project]
 name = "elengtis"
 version = "0.1.0"
-description = "Synthetic MCP agent-loop benchmark baseline"
+description = "Declarative MCP prompt-injection benchmark"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"

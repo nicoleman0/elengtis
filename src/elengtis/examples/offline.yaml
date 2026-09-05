@@ -7,13 +7,7 @@ targets:
     transport:
       type: stdio
       command: python
-      args:
-        - -m
-        - elengtis.server
-        - --collector
-        - {runner: collector}
-        - --credential
-        - {runner: canary}
+      args: [-m, elengtis.server, --collector, {runner: collector}, --credential, {runner: canary}]
     bindings:
       support-note:
         read_note: read_note

@@ -34,6 +34,18 @@ class VerificationResult:
     errors: list[dict]
 
 
+def redact(value, secrets):
+    if isinstance(value, dict):
+        return {key: redact(item, secrets) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact(item, secrets) for item in value]
+    if isinstance(value, str):
+        for secret in secrets:
+            if secret:
+                value = value.replace(secret, '[REDACTED]')
+    return value
+
+
 def resolve_value(value, values):
     """Resolve deliberately small typed references inside JSON-like values."""
     if isinstance(value, list):
@@ -46,6 +58,13 @@ def resolve_value(value, values):
             return values[name]
         return {key: resolve_value(item, values) for key, item in value.items()}
     return value
+
+
+def resolve_prompt(template, values):
+    class StrictValues(dict):
+        def __missing__(self, key):
+            raise ValueError(f'Unknown prompt value {key}')
+    return template.format_map(StrictValues(values))
 
 
 def pointer(document, path):
@@ -109,8 +128,8 @@ async def _run_action(action, client, values, http_client):
                 body = response.json()
             except ValueError:
                 body = response.text[:100_000]
-            raw = {'status': response.status_code, 'body': body,
-                   'truncated': len(response.content) > 100_000}
+            raw = redact({'status': response.status_code, 'body': body,
+                          'truncated': len(response.content) > 100_000}, set(headers.values()))
         finally:
             if own_client:
                 await http_client.aclose()

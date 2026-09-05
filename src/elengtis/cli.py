@@ -1,14 +1,15 @@
 """Validate and run declarative MCP auditing campaigns."""
-import argparse, asyncio, hashlib, json, platform, subprocess, tempfile, traceback, uuid
+import argparse, asyncio, hashlib, json, platform, subprocess, sys, tempfile, traceback, uuid
 from collections import Counter
 from datetime import datetime, timezone
 from importlib import import_module
+from importlib.resources import files
 from importlib.metadata import version
 from pathlib import Path
 
 from elengtis.config import Campaign, CampaignBundle, Scenario, load_campaign, plan_trials, write_schemas
 from elengtis.reference import ScriptedProvider
-from elengtis.scenario import evaluate_proposals, resolve_value, run_actions, verify
+from elengtis.scenario import evaluate_proposals, resolve_prompt, resolve_value, run_actions, verify
 from elengtis.transports import open_target
 
 SCHEMA_VERSION, METRICS_VERSION, MAX_CONSECUTIVE_TARGET_FAILURES = 3, 1, 3
@@ -81,6 +82,8 @@ async def run_matrix(bundle, out, run_id=None, prior=()):
     run_id = run_id or str(uuid.uuid4())
     done = {r['trial_id'] for r in prior if r['evidence_status'] == 'complete'}
     counts, rows = Counter(r['trial_id'] for r in prior), list(prior)
+    target_failures = Counter()
+    incomplete = False
     if not resuming:
         out.mkdir(parents=True)
         manifest = {'schema_version': SCHEMA_VERSION, 'metrics_version': METRICS_VERSION,
@@ -113,8 +116,8 @@ async def run_matrix(bundle, out, run_id=None, prior=()):
                                 metrics, evidence = await engine(
                                     live_provider(campaign.model) if campaign.model else ScriptedProvider('comply'),
                                     campaign.model or 'scripted/comply', client, campaign.step_budget,
-                                    system_prompt=trial.scenario.exercise.system,
-                                    user_prompt=trial.scenario.exercise.user,
+                                    system_prompt=resolve_prompt(trial.scenario.exercise.system, values),
+                                    user_prompt=resolve_prompt(trial.scenario.exercise.user, values),
                                     allowed_tools=resolve_value(trial.scenario.exercise.tools, values))
                                 termination = metrics['termination']
                                 proposal = evaluate_proposals(trial.scenario.proposal_rules,
@@ -149,8 +152,16 @@ async def run_matrix(bundle, out, run_id=None, prior=()):
                        'evidence': evidence_name,
                        'evidence_status': 'complete' if terminal else 'incomplete'}
                 stream.write(json.dumps(row) + '\n'); stream.flush(); rows.append(row); counts[trial.trial_id] += 1
-                if not terminal:
-                    raise RuntimeError(f'{trial.trial_id} did not reach a terminal outcome')
+                if terminal:
+                    target_failures[trial.target.id] = 0
+                else:
+                    incomplete = True
+                    target_failures[trial.target.id] += 1
+                    if target_failures[trial.target.id] >= MAX_CONSECUTIVE_TARGET_FAILURES:
+                        raise RuntimeError(f'{trial.target.id} failed '
+                                           f'{MAX_CONSECUTIVE_TARGET_FAILURES} consecutive trials')
+    if incomplete:
+        raise RuntimeError('campaign has incomplete attempts; fix the target and resume')
     write_summary(bundle, out, rows)
 
 
@@ -162,16 +173,23 @@ def build_parser():
     run = commands.add_parser('run'); run.add_argument('--config', type=Path); run.add_argument('--out', type=Path, required=True)
     run.add_argument('--resume', action='store_true'); run.add_argument('--trials', type=int)
     run.add_argument('--step-budget', type=int); run.add_argument('--engine', choices=tuple(ENGINES)); run.add_argument('--model')
+    example = commands.add_parser('example'); example.add_argument('--out', type=Path, required=True)
     return parser
 
 
 def main():
     parser, args = build_parser(), None
-    args = parser.parse_args()
+    argv = sys.argv[1:]
+    if argv and argv[0].startswith('-'):
+        argv.insert(0, 'run')
+    args = parser.parse_args(argv)
     try:
         if args.command == 'schema': write_schemas(args.out); return
         if args.command == 'validate':
             print('\n'.join(t.trial_id for t in plan_trials(load_campaign(args.config)))); return
+        if args.command == 'example':
+            bundle, run_id, prior = load_campaign(Path(str(files('elengtis').joinpath('examples/offline.yaml')))), None, ()
+            asyncio.run(run_matrix(bundle, args.out, run_id, prior)); return
         if args.resume:
             if args.config or any(getattr(args, k) is not None for k in ('trials', 'step_budget', 'engine', 'model')):
                 raise ValueError('--resume uses recorded configuration; remove overrides')

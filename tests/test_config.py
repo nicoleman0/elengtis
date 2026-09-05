@@ -95,6 +95,15 @@ class ConfigTests(unittest.TestCase):
                 schema = json.loads((out / name).read_text())
                 self.assertEqual(schema['additionalProperties'], False)
 
+    def test_rejects_matcher_examples_that_do_not_match_their_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            campaign = self.files(root)
+            (root / 'one.yaml').write_text(SCENARIO.replace('name: read_note', 'name: harmless', 1))
+            with patch.dict(os.environ, {'TEST_MCP_TOKEN': 'secret'}):
+                with self.assertRaisesRegex(ValueError, 'positive example'):
+                    load_campaign(campaign)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).parent.parent
+EXAMPLE = ROOT / 'src/elengtis/examples/offline.yaml'
 
 
 class ResumeTests(unittest.TestCase):
@@ -13,7 +14,7 @@ class ResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / 'results'
             first = subprocess.run([sys.executable, '-m', 'elengtis', 'run', '--config',
-                                    str(ROOT / 'examples/offline.yaml'), '--out', str(out)],
+                                    str(EXAMPLE), '--out', str(out)],
                                    capture_output=True, text=True, timeout=30)
             self.assertEqual(first.returncode, 0, first.stderr)
             before = (out / 'runs.jsonl').read_bytes()
@@ -27,7 +28,7 @@ class ResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / 'results'
             subprocess.run([sys.executable, '-m', 'elengtis', 'run', '--config',
-                            str(ROOT / 'examples/offline.yaml'), '--out', str(out)],
+                            str(EXAMPLE), '--out', str(out)],
                            check=True, capture_output=True, text=True, timeout=30)
             manifest = json.loads((out / 'manifest.json').read_text())
             manifest['schema_version'] = 2

@@ -24,7 +24,9 @@ jobs:
         run: uv sync --locked
 
       - name: Deterministic checks — no secrets, no live model calls
-        run: uv run python -m unittest discover -s tests -v
+        run: |
+          uv run python -m unittest discover -s tests -v
+          uv run elengtis validate src/elengtis/examples/offline.yaml
 
       - name: Build the package
         run: uv build
@@ -32,5 +34,5 @@ jobs:
       - name: Run the documented example from the built wheel
         run: |
           uv run --isolated --no-project --with dist/*.whl \
-            elengtis --engine graph --out "$RUNNER_TEMP/example"
-          grep -q 'completed: 1/4' "$RUNNER_TEMP/example/summary.txt"
+            elengtis example --out "$RUNNER_TEMP/example"
+          grep -q 'completed: 1/1' "$RUNNER_TEMP/example/summary.txt"

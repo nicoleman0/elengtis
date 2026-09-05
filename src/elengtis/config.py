@@ -191,6 +191,18 @@ def load_campaign(path: Path, overrides=None):
             missing = set(scenario.bindings) - supplied.keys()
             if missing:
                 raise ValueError(f'target {target.id} scenario {scenario.id} missing bindings {sorted(missing)}')
+            from elengtis.scenario import evaluate_proposals, resolve_value
+            values = dict(supplied) | {'canary': 'EXAMPLE'}
+            for rule in scenario.proposal_rules:
+                for label, examples in (('positive', rule.examples.positive),
+                                        ('negative', rule.examples.negative)):
+                    for example in examples:
+                        trajectory = [{'step': 0, 'calls': [{'id': 'example',
+                            'name': example.name,
+                            'arguments': resolve_value(example.arguments, values)}]}]
+                        matched = evaluate_proposals([rule], trajectory, values).proposed
+                        if matched != (label == 'positive'):
+                            raise ValueError(f'{rule.id} {label} example is labelled incorrectly')
     return CampaignBundle(campaign, scenarios, path)
 
 

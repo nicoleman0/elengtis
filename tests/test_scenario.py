@@ -1,11 +1,17 @@
 import unittest
+import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 
-from elengtis.config import (Examples, McpAction, Predicate, ProposalRule,
-                             StdioTransport, Target, ToolExample, Verifier)
-from elengtis.scenario import evaluate_proposals, pointer, resolve_value, run_actions, verify
+import httpx
+from unittest.mock import patch
+
+from elengtis.config import (EnvRef, Examples, HttpAction, McpAction, Predicate,
+                             ProposalRule, StdioTransport, Target, ToolExample, Verifier)
+from elengtis.scenario import (evaluate_proposals, pointer, resolve_prompt, resolve_value,
+                               run_actions, verify)
 from elengtis.transports import open_target
 
 
@@ -15,6 +21,13 @@ class ScenarioEvaluationTests(unittest.TestCase):
         value = {'name': {'binding': 'tool'}, 'payload': [{'runner': 'canary'}]}
         self.assertEqual(resolve_value(value, values),
                          {'name': 'documents.read', 'payload': ['trial-123']})
+
+    def test_prompt_substitution_rejects_unknown_names(self):
+        self.assertEqual(resolve_prompt('Inspect {document} for {canary}.',
+                                        {'document': 'note-1', 'canary': 'TOKEN'}),
+                         'Inspect note-1 for TOKEN.')
+        with self.assertRaisesRegex(ValueError, 'missing'):
+            resolve_prompt('Inspect {missing}.', {})
 
     def test_json_pointer_decodes_escaped_segments(self):
         self.assertEqual(pointer({'a/b': {'~key': 3}}, '/a~1b/~0key'), 3)
@@ -85,6 +98,20 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         result = await run_actions(actions, Client(), {}, 'cleanup', best_effort=True)
         self.assertEqual(len(result.records), 2)
         self.assertEqual(result.errors[0]['phase'], 'cleanup')
+
+    async def test_http_action_uses_env_header_and_redacts_echoed_secret(self):
+        seen = {}
+        def handler(request):
+            seen['authorization'] = request.headers['Authorization']
+            return httpx.Response(200, json={'echo': request.headers['Authorization']})
+        action = HttpAction(type='http_request', id='check', method='GET',
+                            url='https://example.test/check',
+                            headers={'Authorization': EnvRef(env='TEST_SECRET')})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with patch.dict(os.environ, {'TEST_SECRET': 'SUPERSECRET'}):
+                result = await run_actions([action], None, {}, 'verification', client)
+        self.assertEqual(seen['authorization'], 'SUPERSECRET')
+        self.assertNotIn('SUPERSECRET', json.dumps(result.records))
 
 
 if __name__ == '__main__':
