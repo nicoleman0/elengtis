@@ -20,6 +20,22 @@ verified completion rate, or execution behaviour?
 `create_agent` is an explicitly distinct condition: its concurrent tool-call
 dispatch is an experimental condition, not a parity failure.
 
+## Focused framework comparison
+
+The primary framework comparison uses only `graph` and `create_agent`:
+`graph` is the custom low-level LangGraph orchestration, while `create_agent`
+is LangChain's prebuilt agent. The `langchain` engine drives the custom graph
+through LangChain's model and MCP adapters, so it is an optional adapter-control
+condition rather than part of the primary framework comparison. The
+`reference` engine remains the deterministic baseline for parity tests.
+
+The focused pilot uses `gpt-oss-20b` and `deepseek-v4-flash-0731`, which passed
+the first-tool-call canary. Mercury 2.5 preview is excluded after repeatedly
+returning an empty, length-terminated response without a tool call; that is
+retained as a provider/model compatibility finding, not counted as a framework
+outcome. The focused plan has 12 cells in its first block and 120 cells across
+10 blocks, with the same three scenarios and a maximum of 480 model calls.
+
 ## Fixed conditions
 
 Before a run, record and do not alter:

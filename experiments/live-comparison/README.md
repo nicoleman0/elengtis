@@ -47,3 +47,24 @@ belongs in the frozen pilot roster.
 
 See [the protocol](../../docs/live-comparison-protocol.md) for fixed conditions,
 stopping rules and the main-run analysis plan.
+
+## Focused framework comparison
+
+For the primary LangGraph-versus-LangChain comparison, use the checked-in
+two-model profile and select only the custom `graph` engine and LangChain's
+`create_agent` engine:
+
+```sh
+uv run python experiments/live-comparison/generate_live_comparison.py \
+  --models experiments/live-comparison/framework-models.yaml \
+  --engines graph create_agent \
+  --experiment-id live-framework-comparison-v1 \
+  --blocks 10 --budget-usd 0.15 \
+  --out experiments/live-comparison/framework-pilot
+```
+
+This creates 12 cells in the first block and 120 cells across the full plan,
+with a 480-call ceiling. Run block 0 with `--smoke`; after it passes, continue
+the same frozen plan with `--resume` and without `--smoke`. The `langchain`
+engine remains available as an adapter-control condition but is not part of the
+focused comparison.
