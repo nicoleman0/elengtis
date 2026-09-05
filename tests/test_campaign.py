@@ -27,6 +27,9 @@ class CampaignCliTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertIn('completed: 1/1', (out / 'summary.txt').read_text())
             self.assertTrue((out / 'local-demo--support-note--0.json').exists())
+            manifest = json.loads((out / 'manifest.json').read_text())
+            self.assertIn('campaign_sha256', manifest['configuration'])
+            self.assertEqual(manifest['experiment']['generation'], {})
 
     def test_example_command_runs_packaged_campaign(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -130,6 +130,11 @@ class Campaign(StrictModel):
     step_budget: int = Field(default=4, ge=1, le=100)
     engine: Literal['reference', 'graph', 'langchain', 'create_agent'] = 'reference'
     model: str | None = None
+    provider_route: str | None = None
+    generation: dict[str, Any] = Field(default_factory=dict)
+    experiment_id: str | None = None
+    block: int | None = Field(default=None, ge=0)
+    order: int | None = Field(default=None, ge=0)
     targets: list[Target] = Field(min_length=1)
     scenarios: list[str] = Field(min_length=1)
 
