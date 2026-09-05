@@ -98,9 +98,9 @@ The JSON object accepts only these fields; omitted fields take the defaults:
 
 Policies must be unique and nonempty. `trials` and `step_budget` must be integers
 from 1 to 100. Execution is sequential, with a 10-second MCP request timeout and
-a 30-second trial deadline. Repeating a deterministic policy repeats a plumbing
-check; it does not add evidence about real models. No retries or resume are
-implemented yet.
+a 30-second trial deadline (300 seconds for live runs). Repeating a deterministic
+policy repeats a plumbing check; it does not add evidence about real models. There
+are no automatic retries; a failed trial is retried by resuming.
 
 ## Execution engines
 
@@ -140,6 +140,49 @@ The `create_agent` path is therefore an aligned comparison, not a drop-in
 replacement. Choosing the primary implementation is deferred until a live
 comparison exists; the benchmark's need for explicit control currently favors the
 `graph` engine, which reproduces the baseline without alignment knobs.
+
+## Resuming an interrupted matrix
+
+A trial failure stops the matrix, so a broken setup fails once rather than twelve
+times. The finished trials stay on disk; `--resume` continues from them:
+
+```sh
+uv run --offline elengtis --policies comply refuse tool_error budget --out results/r
+# interrupted at trial 9 of 12 — Ctrl-C, a rate limit, a flat battery
+uv run --offline elengtis --resume --out results/r
+```
+
+Resume is **between trials only**. A half-finished trial cannot be continued: its MCP
+server was a subprocess that is now dead, its temporary directory is deleted, and the
+collector it was scoring went with it. A graph checkpoint restores a conversation, not a
+killed process, so there is no in-episode recovery and none is claimed.
+
+Completed trials are skipped, not rerun. The interrupted trial is retried from scratch in
+a fresh fixture, and its failed attempt is kept: the retry writes
+`<trial>.retry-1.json` rather than overwriting `<trial>.json`, and each row names its own
+evidence file, so the rows remain the index.
+
+**A retry is another attempt at the same trial, never an extra trial.** The summary
+reports one result per trial and counts attempts separately, so a resumed 12-trial matrix
+reads `trials: 12` with `attempts: 13, of which 1 were retried` — never `trials: 13`.
+Rates keep the denominator they should have.
+
+Configuration comes from the manifest, so `--resume` accepts no other configuration flag;
+two different configurations can never be merged into one dataset. Resume is refused
+outright if the manifest's `schema_version` or `metrics_version` differs from the running
+build, since those rows would no longer mean what new rows mean. A mere source change is
+allowed but recorded: each resumption appends its environment to `manifest.json`, and if
+the sources moved, `summary.txt` says so.
+
+Resuming a finished matrix runs nothing and rewrites the summary. `--out` still refuses
+to touch an existing directory unless `--resume` is given.
+
+A Ctrl-C during a trial kills the fixture first, so the trial is usually recorded as
+`infrastructure_error` from the resulting transport failure rather than `interrupted`.
+Either way the metrics are left unknown and the evidence keeps the full traceback —
+never read a failure as a refusal. Catching the interrupt to label it precisely would
+mean installing a SIGINT handler, which disables asyncio's own cancellation and stops
+Ctrl-C aborting the run at all, so the label stays imprecise on purpose.
 
 ## Live runs
 
@@ -206,7 +249,7 @@ interruption or setup/transport failures that escape the loop record an incomple
 evidence file with diagnostics and any collector content, leave metric values
 unknown (`null`), and stop the matrix with a nonzero exit. Already-written rows
 remain available. A hard process kill cannot guarantee that the current attempt
-is recorded. No summary is produced for an aborted matrix.
+is recorded. No summary is produced for an aborted matrix; resume it to get one.
 
 Never infer refusal from a failure or budget exhaustion. No automated recovery
 claim is made. Evidence contains full text: the bundled example has only synthetic

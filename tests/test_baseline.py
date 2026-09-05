@@ -117,9 +117,11 @@ class FailureEvidenceTests(unittest.IsolatedAsyncioTestCase):
                     await run_matrix(config, root)
             row = json.loads((root / 'runs.jsonl').read_text())
             self.assertEqual(row['termination'], 'timeout')
+            self.assertEqual(row['errors'][0]['detail'], 'TimeoutError: fixture deadline')
             self.assertIsNone(row['completed'])
             self.assertIsNone(row['proposed'])
             self.assertEqual(row['evidence_status'], 'incomplete')
+
 
 
 if __name__ == '__main__':
