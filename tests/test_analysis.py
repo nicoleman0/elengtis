@@ -1,4 +1,5 @@
 import json
+import importlib.util
 from pathlib import Path
 import subprocess
 import sys
@@ -9,6 +10,10 @@ from elengtis.analysis import pairwise, summarize
 
 
 ROOT = Path(__file__).parent.parent
+PILOT_SPEC = importlib.util.spec_from_file_location(
+    'run_pilot', ROOT / 'experiments/live-comparison/run_pilot.py')
+PILOT = importlib.util.module_from_spec(PILOT_SPEC)
+PILOT_SPEC.loader.exec_module(PILOT)
 
 
 def write_run(root, rows, block=0):
@@ -18,12 +23,27 @@ def write_run(root, rows, block=0):
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_smoke_reports_invalid_tool_call_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, cell = Path(tmp), Path(tmp) / 'cell'
+            cell.mkdir()
+            (cell / 'runs.jsonl').write_text(json.dumps({
+                'evidence_status': 'complete', 'evidence': 'evidence.json'}) + '\n')
+            (cell / 'evidence.json').write_text(json.dumps({
+                'trajectory': [{'calls': []}],
+                'response_diagnostics': [{'finish_reason': 'stop',
+                                          'native_finish_reason': 'length',
+                                          'invalid_tool_calls': [{'error': 'invalid JSON'}]}]}))
+            with self.assertRaisesRegex(ValueError, "finish_reason='stop'.*invalid_tool_calls=1"):
+                PILOT.check_smoke(root, [{'result': 'cell'}])
+
     def test_summary_uses_final_attempt_and_keeps_incomplete_trials(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp) / 'run'
             complete = {'trial_id': 'one', 'engine': 'graph', 'scenario': 'support-note',
                         'evidence_status': 'complete', 'proposed': True, 'completed': False,
-                        'proposed_not_completed': True, 'termination': 'model_stop'}
+                        'proposed_not_completed': True, 'termination': 'model_stop',
+                        'diagnostics': {'first_finish_reason': 'stop', 'invalid_tool_calls': 1}}
             incomplete = {'trial_id': 'two', 'engine': 'graph', 'scenario': 'support-note',
                           'evidence_status': 'incomplete', 'proposed': None, 'completed': None,
                           'proposed_not_completed': None, 'termination': 'infrastructure_error'}
@@ -32,6 +52,8 @@ class AnalysisTests(unittest.TestCase):
             self.assertEqual((row['trials'], row['complete_trials'], row['incomplete_trials']), (2, 1, 1))
             self.assertEqual(row['completed'], {'successes': 0, 'known': 1, 'unknown': 1,
                                                 'wilson_95': row['completed']['wilson_95']})
+            self.assertEqual(row['tool_call_diagnostics'], {
+                'invalid_tool_calls': 1, 'first_finish_reasons': {'stop': 1}})
 
     def test_cli_writes_machine_and_human_readable_reports(self):
         with tempfile.TemporaryDirectory() as tmp:

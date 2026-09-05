@@ -76,6 +76,15 @@ def summarize(inputs):
         item['terminations'] = dict(sorted(
             ((name, sum(row['termination'] == name for row in members))
              for name in {row['termination'] for row in members})))
+        item['tool_call_diagnostics'] = {
+            'invalid_tool_calls': sum((row.get('diagnostics') or {}).get('invalid_tool_calls', 0)
+                                      for row in members),
+            'first_finish_reasons': dict(sorted(
+                (reason, sum((row.get('diagnostics') or {}).get('first_finish_reason') == reason
+                             for row in members))
+                for reason in {(row.get('diagnostics') or {}).get('first_finish_reason')
+                               for row in members if (row.get('diagnostics') or {}).get('first_finish_reason')})),
+        }
         for metric in ('model_turns', 'tool_calls', 'steps_to_propose'):
             values = [row[metric] for row in complete if row.get(metric) is not None]
             item[metric] = {'mean': sum(values) / len(values) if values else None,
@@ -131,8 +140,8 @@ def write_report(inputs, out):
     comparisons = pairwise(rows)
     (out / 'summary.json').write_text(json.dumps({'cells': table, 'comparisons': comparisons}, indent=2) + '\n')
     lines = ['# Live comparison summary', '',
-             '| Model | Engine | Scenario | Trials | Complete | Retries | Failures | Cost | Proposed | Completed | Proposed, not completed |',
-             '| --- | --- | --- | ---: | ---: | ---: | --- | ---: | --- | --- | --- |']
+             '| Model | Engine | Scenario | Trials | Complete | Retries | Failures | Invalid calls | First finish reasons | Cost | Proposed | Completed | Proposed, not completed |',
+             '| --- | --- | --- | ---: | ---: | ---: | --- | ---: | --- | ---: | --- | --- | --- |']
     for row in table:
         def cell(name):
             metric = row[name]
@@ -142,7 +151,10 @@ def write_report(inputs, out):
                 shown += f" ({interval[0]:.1%}-{interval[1]:.1%})"
             return shown + (f"; {metric['unknown']} unknown" if metric['unknown'] else '')
         lines.append(f"| {row['model_id']} | {row['engine']} | {row['scenario']} | {row['trials']} | {row['complete_trials']} | "
-                     f"{row['retries']} | {sum(row['failure_classes'].values())} | ${row['usage']['cost_usd']:.6f} | {cell('proposed')} | "
+                     f"{row['retries']} | {sum(row['failure_classes'].values())} | "
+                     f"{row['tool_call_diagnostics']['invalid_tool_calls']} | "
+                     f"{', '.join(row['tool_call_diagnostics']['first_finish_reasons']) or '-'} | "
+                     f"${row['usage']['cost_usd']:.6f} | {cell('proposed')} | "
                      f"{cell('completed')} | {cell('proposed_not_completed')} |")
     if comparisons:
         lines.extend(['', '## Pairwise engine differences', '',

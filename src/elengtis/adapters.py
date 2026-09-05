@@ -82,6 +82,25 @@ def usage_record(message):
     return record
 
 
+def response_diagnostics(message, generation_info=None):
+    """Keep tool-call parsing and provider-stop details beside each model turn."""
+    metadata = message.response_metadata or {}
+    generation_info = generation_info or {}
+    invalid = []
+    for call in message.invalid_tool_calls:
+        invalid.append({key: call.get(key) for key in ('id', 'name', 'args', 'error')
+                        if call.get(key) is not None})
+    return {
+        'response_id': message.id,
+        'finish_reason': generation_info.get('finish_reason'),
+        'native_finish_reason': metadata.get('native_finish_reason'),
+        'provider': metadata.get('provider'),
+        'model_provider': metadata.get('model_provider'),
+        'empty_content': not bool(text_of(message)),
+        'invalid_tool_calls': invalid,
+    }
+
+
 class LiveProvider:
     """A LangChain chat model behind the reference loop's provider interface.
 
@@ -98,7 +117,9 @@ class LiveProvider:
             model, messages, tools, self.chat.max_tokens or self.chat.max_completion_tokens or 0
         ) if self.budget else None
         try:
-            response = await self.chat.ainvoke(to_langchain(messages), tools=tools)
+            result = await self.chat.agenerate([to_langchain(messages)], tools=tools)
+            generation = result.generations[0][0]
+            response = generation.message
         except Exception:
             if self.budget:
                 self.budget.settle(reservation, None)
@@ -110,7 +131,8 @@ class LiveProvider:
             usage.pop('_rates', None)
         return {'content': text_of(response),
                 'tool_calls': [{'name': call['name'], 'arguments': call['args']}
-                               for call in response.tool_calls], 'usage': usage}
+                               for call in response.tool_calls], 'usage': usage,
+                'diagnostics': response_diagnostics(response, generation.generation_info)}
 
 
 class RecordingChatModel(BaseChatModel):
@@ -124,6 +146,7 @@ class RecordingChatModel(BaseChatModel):
     model_name: str
     requests: list = Field(default_factory=list)
     usages: list = Field(default_factory=list)
+    diagnostics: list = Field(default_factory=list)
 
     @property
     def _llm_type(self):
@@ -143,6 +166,7 @@ class RecordingChatModel(BaseChatModel):
         response = await self.provider.complete(self.model_name, baseline, tools)
         usage = response.get('usage')
         self.usages.append(usage)
+        self.diagnostics.append(response.get('diagnostics', {}))
         usage_metadata = {key: usage[key] for key in ('input_tokens', 'output_tokens', 'total_tokens')
                           if usage and usage.get(key) is not None} or None
         response_metadata = {key: usage[key] for key in ('cost_details', 'provider', 'model_provider',
@@ -180,7 +204,8 @@ async def run_episode(provider, model, client, step_budget, system_prompt=SYSTEM
         response = await chat.ainvoke(to_langchain(messages))
         return {'content': response.content,
                 'tool_calls': [{'name': call['name'], 'arguments': call['args']}
-                               for call in response.tool_calls], 'usage': usage_record(response)}
+                               for call in response.tool_calls], 'usage': usage_record(response),
+                'diagnostics': chat.diagnostics[-1]}
 
     async def dispatch(name, arguments):
         if name not in by_name:
@@ -256,7 +281,9 @@ async def run_agent_episode(provider, model, client, step_budget, system_prompt=
     metrics = {'model_turns': len(chat.requests),
                'tool_calls': sum(len(turn['calls']) for turn in trajectory),
                'termination': termination, 'errors': errors,
-               'usage': [usage for usage in chat.usages if usage]}
+               'usage': [usage for usage in chat.usages if usage],
+               'response_diagnostics': chat.diagnostics}
     return metrics, {'tools': [convert_to_openai_tool(tool) for tool in tools],
                      'requests': chat.requests, 'messages': to_baseline(messages),
-                     'trajectory': trajectory, 'usage': metrics['usage']}
+                     'trajectory': trajectory, 'usage': metrics['usage'],
+                     'response_diagnostics': metrics['response_diagnostics']}

@@ -40,5 +40,10 @@ that block and fails if any completed cell did not make its required first note
 tool call. Provider retries are disabled and request timeouts are bounded; a
 partial run stops at the budget cap and can be continued with `--resume`.
 
+Smoke failures include the provider finish reason and any malformed tool calls
+recorded by the adapter. A clean response with no tool call is a model outcome,
+not a provider failure; inspect its evidence before deciding whether that model
+belongs in the frozen pilot roster.
+
 See [the protocol](../../docs/live-comparison-protocol.md) for fixed conditions,
 stopping rules and the main-run analysis plan.
