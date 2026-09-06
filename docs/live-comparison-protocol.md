@@ -29,6 +29,12 @@ through LangChain's model and MCP adapters, so it is an optional adapter-control
 condition rather than part of the primary framework comparison. The
 `reference` engine remains the deterministic baseline for parity tests.
 
+The resulting product guidance is role-based: use LangChain's `create_agent`
+as the default for straightforward agents, and use the custom LangGraph
+`graph` engine when explicit state, branching, recovery, ordering, or evidence
+control is part of the workflow contract. This experiment does not support a
+universal safety ranking of the two frameworks.
+
 The focused comparison uses `gpt-oss-20b`, `deepseek-v4-flash-0731`, and
 `gpt-5-mini`. The focused plan has 24 cells per block and 480 cells across 20
 blocks, with a six-turn budget and a maximum of 2,880 model calls. The older
