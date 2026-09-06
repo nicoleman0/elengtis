@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 from elengtis.config import ContainerTransport, load_campaign
 from elengtis.cli import build_parser
-from elengtis.transports import docker_run_args, unmanaged_target_metadata
+from elengtis.transports import (_close_target, docker_relay_args, docker_run_args,
+                                 unmanaged_target_metadata)
 
 
 SCENARIO = '''
@@ -37,6 +38,22 @@ verify:
 
 
 class IsolationTests(unittest.TestCase):
+    def test_docker_cleanup_runs_when_mcp_context_close_fails(self):
+        class Stack:
+            async def aclose(self):
+                raise RuntimeError('session close failed')
+
+        class Lifecycle:
+            cleaned = False
+
+            def cleanup(self):
+                self.cleaned = True
+
+        lifecycle = Lifecycle()
+        with self.assertRaisesRegex(RuntimeError, 'session close failed'):
+            asyncio.run(_close_target(Stack(), lifecycle, None))
+        self.assertTrue(lifecycle.cleaned)
+
     def test_docker_run_args_apply_hardening_without_pull_or_host_access(self):
         transport = ContainerTransport(type='isolated_container', image='target:latest',
                                        container_port=3000, uid=10001, gid=10001,
@@ -56,6 +73,17 @@ class IsolationTests(unittest.TestCase):
         self.assertNotIn('--privileged', args)
         self.assertNotIn('--volume', args)
         self.assertNotIn('--device', args)
+
+    def test_runner_relay_is_localhost_only_and_separate_from_target_network(self):
+        args = docker_relay_args('python@sha256:relay', 'relay', 3000)
+        self.assertEqual(args[0], 'create')
+        self.assertIn('--pull=never', args)
+        self.assertIn('--publish', args)
+        self.assertIn('127.0.0.1::3001', args)
+        self.assertIn('--cap-drop=ALL', args)
+        self.assertIn('--user=65534:65534', args)
+        self.assertNotIn('--network', args)
+        self.assertEqual(args[-2:], ['target', '3000'])
 
     def test_isolated_target_requires_external_http_verifier(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -84,6 +112,15 @@ scenarios: [scenario.yaml]
         self.assertEqual(metadata['isolation'], 'externally_managed')
         self.assertEqual(metadata['session'], 'fresh_client')
         self.assertFalse(metadata['reset_asserted'])
+
+    def test_isolated_metadata_identifies_each_fresh_container(self):
+        from elengtis.transports import ContainerLifecycle
+
+        lifecycle = ContainerLifecycle('name', 'network', 'image-id', 'container-id')
+        metadata = lifecycle.metadata()
+        self.assertEqual(metadata['container_id'], 'container-id')
+        self.assertEqual(metadata['session'], 'fresh_container')
+        self.assertTrue(metadata['reset_asserted'])
 
     def test_preflight_is_a_model_free_command(self):
         args = build_parser().parse_args(['preflight', 'campaign.yaml'])

@@ -1,4 +1,4 @@
-"""Linux CI smoke test for the isolated container target contract."""
+"""Docker smoke test for the isolated container target contract."""
 import json
 from pathlib import Path
 import socket
@@ -70,6 +70,7 @@ targets:
       type: isolated_container
       image: IMAGE_TAG
       container_port: 3000
+      relay_image: IMAGE_TAG
       uid: 10001
       gid: 10001
     bindings:

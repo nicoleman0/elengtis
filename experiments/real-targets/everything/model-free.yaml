@@ -1,0 +1,19 @@
+schema_version: 1
+trials: 2
+step_budget: 1
+engine: reference
+model_free: true
+targets:
+  - id: everything
+    transport:
+      type: isolated_container
+      image: elengtis/everything:2026.8.31
+      container_port: 3001
+      uid: 10001
+      gid: 10001
+      path: /mcp
+      relay_image: python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6
+    bindings:
+      model-free-echo:
+        echo: echo
+scenarios: [scenarios/model-free-echo.yaml]

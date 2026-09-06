@@ -11,6 +11,9 @@ targets:
       uid: 10001
       gid: 10001
       path: /mcp
+      # Optional on hosts that cannot route directly to internal container IPs.
+      # Preload and digest-pin a trusted image containing python3.
+      # relay_image: python@sha256:replace-with-reviewed-digest
     bindings:
       real-server:
         read_note: read_note

@@ -21,6 +21,12 @@ network and uses a short-lived trusted runner relay bound to `127.0.0.1` for
 the MCP client connection; the audited process never receives a second,
 egress-capable network.
 
+On hosts such as Docker Desktop that cannot route directly to an internal
+container IP, set `relay_image` to a preloaded, digest-pinned image containing
+`python3`. Elengtis runs that trusted relay with a localhost-only published
+port, then attaches it to the target's internal network. The target itself
+remains internal-only; relay identity and cleanup are recorded in evidence.
+
 The runner keeps provider and target environment references outside manifests
 and evidence. It passes target environment values through a short-lived mode
 0600 Docker env file, then removes that file after startup. Do not put secrets
@@ -37,6 +43,17 @@ elengtis preflight campaign.yaml
 target once, checks the MCP tool inventory and configured allowlists, and
 tears down an isolated container. It does not run setup, exercise, verification
 or cleanup actions.
+
+For a full actions-only pass, set `model_free: true` with `engine: reference`
+and run the campaign normally. Elengtis executes trusted setup, verification
+and cleanup actions without constructing a model or scripted agent. Two or more
+trials let you compare recorded container IDs and network names while checking
+that each teardown succeeded.
+
+The Everything-server bundle in `experiments/real-targets/everything/` is the
+first protocol and lifecycle example. Its HTTP verifier is deliberately
+liveness-only, so its `completed` field must not be interpreted as independent
+evidence of target state mutation.
 
 Existing `streamable_http` targets remain useful for authorized services that
 you cannot deploy locally. They receive a fresh client session, but Elengtis

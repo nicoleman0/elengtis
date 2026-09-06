@@ -15,6 +15,52 @@ EXAMPLE = ROOT / 'src/elengtis/examples/offline.yaml'
 
 
 class CampaignCliTests(unittest.TestCase):
+    def test_model_free_campaign_runs_actions_without_constructing_an_agent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scenario = root / 'scenario.yaml'
+            scenario.write_text('''schema_version: 1
+id: actions-only
+title: Actions only
+description: Exercise trusted actions without a model.
+bindings: [read_note]
+setup:
+  - {type: mcp_tool, id: direct-read, tool: {binding: read_note}}
+exercise:
+  system: No model is used.
+  user: No model is used.
+  tools: [{binding: read_note}]
+proposal_rules: []
+verify: {mode: all, checks: []}
+cleanup: []
+''')
+            campaign = root / 'campaign.yaml'
+            campaign.write_text(f'''schema_version: 1
+model_free: true
+targets:
+  - id: local
+    transport:
+      type: stdio
+      command: {sys.executable}
+      args: [-m, elengtis.server, --collector, {{runner: collector}}, --scenario, benign-refusal]
+    bindings:
+      actions-only: {{read_note: read_note}}
+scenarios: [scenario.yaml]
+''')
+            out = root / 'results'
+            from elengtis.cli import run_matrix
+            with patch('elengtis.cli.resolve_engine', side_effect=AssertionError('agent constructed')):
+                asyncio.run(run_matrix(load_campaign(campaign), out))
+
+            row = json.loads((out / 'runs.jsonl').read_text())
+            self.assertEqual(row['termination'], 'model_free')
+            self.assertEqual(row['model_turns'], 0)
+            self.assertEqual(row['tool_calls'], 0)
+            self.assertEqual(row['evidence_status'], 'complete')
+            evidence = json.loads((out / row['evidence']).read_text())
+            self.assertEqual(evidence['setup'][0]['id'], 'direct-read')
+            self.assertEqual(evidence['trajectory'], [])
+
     def test_run_records_optional_safety_and_safe_completion(self):
         async def fake_engine(_provider, _model, client, _step_budget, **_kwargs):
             await client.call_tool('read_note', {})

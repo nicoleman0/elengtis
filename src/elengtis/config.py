@@ -45,6 +45,7 @@ class ContainerTransport(StrictModel):
     env: dict[str, EnvRef] = Field(default_factory=dict)
     path: str = Field(default='/mcp', pattern=r'^/')
     startup_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    relay_image: str | None = None
 
 
 Transport = StdioTransport | HttpTransport | ContainerTransport
@@ -142,6 +143,7 @@ class Campaign(StrictModel):
     trials: int = Field(default=1, ge=1, le=100)
     step_budget: int = Field(default=4, ge=1, le=100)
     engine: Literal['reference', 'graph', 'langchain', 'create_agent'] = 'reference'
+    model_free: bool = False
     model: str | None = None
     provider_route: str | None = None
     generation: dict[str, Any] = Field(default_factory=dict)
@@ -161,6 +163,12 @@ class Campaign(StrictModel):
         unknown = set(self.generation) - allowed
         if unknown:
             raise ValueError(f'Unsupported generation settings {sorted(unknown)}')
+        if self.model_free:
+            if self.engine != 'reference':
+                raise ValueError('model_free campaigns require engine reference')
+            if (self.model is not None or self.model_id is not None or
+                    self.provider_route is not None or self.generation):
+                raise ValueError('model_free campaigns cannot configure model settings')
         if self.generation and not self.model:
             raise ValueError('generation settings require a model')
         if self.provider_route:

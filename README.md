@@ -89,6 +89,12 @@ Configuration must use `.yaml` or `.yml`. JSON and the old scripted `policies`
 interface are intentionally unsupported. Run-level `--trials`,
 `--step-budget`, `--engine`, and `--model` overrides remain available.
 
+Set `model_free: true` with the `reference` engine to run only declarative
+setup, verification and cleanup actions. This mode never constructs a model or
+the built-in scripted provider, and records `termination: model_free` with zero
+model turns and tool calls. Model, route and generation settings are rejected
+in a model-free campaign.
+
 ## Targets and credentials
 
 `stdio` targets declare a command and argument list. Arguments are passed
@@ -119,6 +125,8 @@ targets:
       container_port: 3000
       uid: 10001
       gid: 10001
+      # Optional Docker Desktop ingress relay; preload and pin this image.
+      # relay_image: python@sha256:...
       command: ["server", "--mcp"]
     bindings:
       scenario-id: {read_note: notes.read}
@@ -137,6 +145,11 @@ verification call back into the audited MCP server is not an independent
 boundary. Outbound dependencies are intentionally unsupported in this first
 isolated path; see [issue #13](https://github.com/nicoleman0/elengtis/issues/13)
 for policy-proxied egress.
+
+Lifecycle evidence includes the immutable image and container IDs, identifies
+the session as a fresh container, and explicitly records that reset is
+asserted. The tracked Everything-server onboarding and smoke campaign is under
+[`experiments/real-targets/everything/`](experiments/real-targets/everything/).
 
 ## Scenarios
 
