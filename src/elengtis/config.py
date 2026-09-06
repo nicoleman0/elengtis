@@ -234,8 +234,9 @@ def load_campaign(path: Path, overrides=None):
             supplied = target.bindings.get(scenario.id)
             if supplied is None:
                 raise ValueError(f'target {target.id} has no bindings for scenario {scenario.id}')
-            if isinstance(transport, ContainerTransport) and not any(
-                    isinstance(check.action, HttpAction) for check in scenario.verify.checks):
+            if (scenario.verify.checks and isinstance(transport, ContainerTransport)
+                    and not any(isinstance(check.action, HttpAction)
+                                for check in scenario.verify.checks)):
                 raise ValueError(f'target {target.id} scenario {scenario.id} requires an '
                                  'external HTTP verifier')
             missing = set(scenario.bindings) - supplied.keys()

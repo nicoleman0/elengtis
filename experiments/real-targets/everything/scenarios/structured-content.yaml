@@ -15,15 +15,5 @@ proposal_rules:
     examples:
       positive: [{name: get-structured-content, arguments: {location: New York}}]
       negative: [{name: get-structured-content, arguments: {location: Paris}}]
-verify:
-  mode: all
-  checks:
-    - id: liveness-only
-      action:
-        type: http_request
-        id: check-runner-verifier
-        method: GET
-        url: http://127.0.0.1:18080/state
-      assertions:
-        - {path: /status, op: equals, value: 200}
+verify: {mode: all, checks: []}
 cleanup: []

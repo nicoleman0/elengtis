@@ -1,5 +1,6 @@
 """Docker smoke test for the isolated container target contract."""
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -10,6 +11,8 @@ import uuid
 
 
 ROOT = Path(__file__).parents[1]
+SOCAT_IMAGE = ('alpine/socat@sha256:'
+               'ef6c281978dcd6927d9b3829484e4c4fdfc5d98de5acbd6312c04565d2d58cbf')
 
 
 def docker(*args, check=True):
@@ -23,6 +26,15 @@ def free_port():
         return sock.getsockname()[1]
 
 
+def relay_modes():
+    """Docker Desktop cannot route to internal container IPs, so it covers socat only."""
+    override = os.environ.get('ELENGTIS_SMOKE_RELAY_MODES')
+    if override:
+        return tuple(mode.strip() for mode in override.split(',') if mode.strip())
+    daemon = docker('info', '--format', '{{.OperatingSystem}}').stdout.strip()
+    return ('socat',) if 'Docker Desktop' in daemon else ('direct', 'socat')
+
+
 def main():
     tag = f'elengtis-ci-target:{uuid.uuid4().hex}'
     verifier_port = free_port()
@@ -30,7 +42,11 @@ def main():
                                  str(verifier_port)], stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
     try:
+        modes = relay_modes()
+        print(f'relay modes covered: {", ".join(modes)}')
         docker('build', '--tag', tag, '--file', 'tests/docker-target/Dockerfile', '.')
+        if 'socat' in modes:  # preload outside campaign execution; runs use --pull=never
+            docker('pull', SOCAT_IMAGE)
         for _ in range(50):
             if verifier.poll() is not None:
                 raise RuntimeError('verifier exited before the smoke run')
@@ -70,7 +86,7 @@ targets:
       type: isolated_container
       image: IMAGE_TAG
       container_port: 3000
-      relay_image: IMAGE_TAG
+RELAY_LINE
       uid: 10001
       gid: 10001
     bindings:
@@ -80,17 +96,21 @@ targets:
         submit_credential: submit_demo_credential
 scenarios: [scenario.yaml]
 '''.replace('IMAGE_TAG', tag)
-            (root / 'campaign.yaml').write_text(campaign)
-            subprocess.run([sys.executable, '-m', 'elengtis', 'preflight',
-                             str(root / 'campaign.yaml')], cwd=ROOT, check=True)
-            out = root / 'results'
-            subprocess.run([sys.executable, '-m', 'elengtis', 'run', '--config',
-                             str(root / 'campaign.yaml'), '--out', str(out)],
-                           cwd=ROOT, check=True)
-            assert 'completed: 1/1' in (out / 'summary.txt').read_text()
-            evidence = json.loads((out / 'target--smoke--0.json').read_text())
-            assert evidence['target_execution']['isolation'] == 'isolated_container'
-            assert evidence['target_execution']['cleanup']['ok'] is True
+            for mode in modes:
+                config = root / f'campaign-{mode}.yaml'
+                config.write_text(campaign.replace(
+                    'RELAY_LINE\n', f'      relay_image: {SOCAT_IMAGE}\n' if mode == 'socat' else ''))
+                subprocess.run([sys.executable, '-m', 'elengtis', 'preflight', str(config)],
+                               cwd=ROOT, check=True)
+                out = root / f'results-{mode}'
+                subprocess.run([sys.executable, '-m', 'elengtis', 'run', '--config',
+                                 str(config), '--out', str(out)], cwd=ROOT, check=True)
+                assert 'completed: 1/1' in (out / 'summary.txt').read_text()
+                evidence = json.loads((out / 'target--smoke--0.json').read_text())
+                execution = evidence['target_execution']
+                assert execution['isolation'] == 'isolated_container'
+                assert execution['cleanup']['ok'] is True
+                assert ('relay' in execution) is (mode == 'socat'), mode
         assert not docker('ps', '-a', '--filter', 'label=elengtis.managed=true', '-q').stdout.strip()
         assert not docker('network', 'ls', '--filter', 'label=elengtis.managed=true', '-q').stdout.strip()
     finally:

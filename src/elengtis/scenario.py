@@ -189,5 +189,7 @@ async def verify(checks, mode, client, values, http_client=None):
                                    'actual': actual, 'expected': expected, 'matched': matched})
             verdicts.append(all(item['matched'] for item in assertions))
         records.append({'id': check.id, 'action': record, 'assertions': assertions})
-    completed = None if errors else (all(verdicts) if mode == 'all' else any(verdicts))
+    # No checks means no outcome was verified, which all([]) would otherwise report as success.
+    completed = (None if errors or not checks
+                 else (all(verdicts) if mode == 'all' else any(verdicts)))
     return VerificationResult(completed, records, errors)

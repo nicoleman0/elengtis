@@ -41,7 +41,7 @@ targets:
       uid: 10001
       gid: 10001
       path: /mcp
-      relay_image: python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6
+      relay_image: alpine/socat@sha256:ef6c281978dcd6927d9b3829484e4c4fdfc5d98de5acbd6312c04565d2d58cbf
     bindings:
       {scenario}:
         {binding}
@@ -64,8 +64,7 @@ def main():
         shutil.copyfile(source / filename, scenarios / filename)
 
     runs = []
-    cells = [(PROFILES[0], SCENARIOS[0]), (PROFILES[1], SCENARIOS[1]),
-             (PROFILES[0], SCENARIOS[1]), (PROFILES[1], SCENARIOS[0])]
+    cells = [(profile, scenario) for profile in PROFILES for scenario in SCENARIOS]
     for order, (profile, (scenario, filename, binding)) in enumerate(cells):
         name = f'b000-o{order:02d}-{profile["id"]}-{scenario}'
         config = campaigns / f'{name}.yaml'

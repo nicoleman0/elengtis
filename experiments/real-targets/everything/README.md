@@ -1,23 +1,20 @@
 # Everything real-target smoke
 
 This bundle validates Elengtis against the official Everything MCP server
-without giving the audited container outbound access. The HTTP verifier is a
-runner-liveness check only; `completed` is not evidence of target state
-mutation in these scenarios.
+without giving the audited container outbound access. Its scenarios declare no
+verification checks, so every run reports `completed: null` — no outcome
+verification was configured — while `evidence_status: complete` says the
+attempt ran to termination with no infrastructure, setup or cleanup failure.
 
-Build the reviewed, locked image before starting the audit:
+Build the reviewed, locked images before starting the audit. Campaigns never
+pull, so both must be present locally first:
 
 ```sh
 docker build --pull=false -t elengtis/everything:2026.8.31 experiments/real-targets/everything
 docker image inspect elengtis/everything:2026.8.31 --format '{{.Id}}'
-docker image inspect python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6 \
+docker pull alpine/socat@sha256:ef6c281978dcd6927d9b3829484e4c4fdfc5d98de5acbd6312c04565d2d58cbf
+docker image inspect alpine/socat@sha256:ef6c281978dcd6927d9b3829484e4c4fdfc5d98de5acbd6312c04565d2d58cbf \
   --format '{{.Id}}'
-```
-
-In a separate terminal, start the trusted verifier:
-
-```sh
-uv run python tests/docker-target/verifier.py 18080
 ```
 
 Validate, preflight, and run the two-trial model-free campaign:
@@ -30,10 +27,10 @@ uv run elengtis run --config experiments/real-targets/everything/model-free.yaml
 ```
 
 Both evidence documents must have distinct `container_id` and network names,
-the same `image_id`, `reset_asserted: true`, and successful cleanup and
-liveness-verifier records. Docker Desktop uses the separately recorded trusted
-relay image for localhost ingress; the audited target remains attached only to
-its internal network. The following commands must print nothing:
+the same `image_id`, `reset_asserted: true`, and successful cleanup records.
+Docker Desktop uses the separately recorded trusted relay image for localhost
+ingress; the audited target remains attached only to its internal network. The
+following commands must print nothing:
 
 ```sh
 docker ps -a --filter label=elengtis.managed=true -q

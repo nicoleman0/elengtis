@@ -88,39 +88,6 @@ def docker_run_args(transport: ContainerTransport, name, network, env_file):
 
 
 RELAY_PORT = 3001
-RELAY_SCRIPT = '''
-import socket, socketserver, sys, threading, time
-target, port = sys.argv[1], int(sys.argv[2])
-def pipe(source, destination):
-    try:
-        while data := source.recv(65536):
-            destination.sendall(data)
-    except OSError:
-        pass
-    try:
-        destination.shutdown(socket.SHUT_WR)
-    except OSError:
-        pass
-class Handler(socketserver.BaseRequestHandler):
-    def handle(self):
-        for _ in range(300):
-            try:
-                remote = socket.create_connection((target, port), timeout=1)
-                break
-            except OSError:
-                time.sleep(.1)
-        else:
-            return
-        with remote:
-            remote.settimeout(None)
-            upstream = threading.Thread(target=pipe, args=(self.request, remote))
-            downstream = threading.Thread(target=pipe, args=(remote, self.request))
-            upstream.start(); downstream.start()
-            upstream.join(); downstream.join()
-class Server(socketserver.ThreadingTCPServer):
-    allow_reuse_address = True
-Server(('0.0.0.0', 3001), Handler).serve_forever()
-'''
 
 
 def docker_relay_args(image, name, target_port):
@@ -131,8 +98,8 @@ def docker_relay_args(image, name, target_port):
         '--publish', f'127.0.0.1::{RELAY_PORT}', '--read-only',
         '--tmpfs=/tmp:rw,noexec,nosuid,size=16m', '--cap-drop=ALL',
         '--security-opt=no-new-privileges:true', '--pids-limit=64', '--memory=64m',
-        '--cpus=.25', '--user=65534:65534', '--entrypoint=python3', image,
-        '-c', RELAY_SCRIPT, 'target', str(target_port),
+        '--cpus=.25', '--user=65534:65534', '--entrypoint=socat', image,
+        f'TCP-LISTEN:{RELAY_PORT},fork,reuseaddr', f'TCP:target:{target_port}',
     ]
 
 
@@ -208,8 +175,8 @@ def _open_container(transport):
                 raise RuntimeError('docker relay create returned no container ID')
             _docker(['network', 'connect', network, relay_name], check=True)
             _docker(['start', relay_name], check=True)
-            return lifecycle, '127.0.0.1', _published_port(relay_name), False
-        return lifecycle, _docker_container_ip(name, network), transport.container_port, True
+            return lifecycle, '127.0.0.1', _published_port(relay_name)
+        return lifecycle, _docker_container_ip(name, network), transport.container_port
     except Exception:
         try:
             if 'lifecycle' in locals():
@@ -256,21 +223,16 @@ class _LocalhostRelay:
             await asyncio.gather(*tuple(self.handlers), return_exceptions=True)
 
 
-async def _localhost_relay(address, port, timeout):
+async def _localhost_relay(address, port):
     handlers = set()
 
     async def relay(reader, writer):
         handlers.add(asyncio.current_task())
         try:
-            deadline = asyncio.get_running_loop().time() + timeout
-            while True:
-                try:
-                    remote_reader, remote_writer = await asyncio.open_connection(address, port)
-                    break
-                except OSError:
-                    if asyncio.get_running_loop().time() >= deadline:
-                        raise
-                    await asyncio.sleep(.1)
+            try:
+                remote_reader, remote_writer = await asyncio.open_connection(address, port)
+            except OSError:
+                return  # target not listening yet; _wait_http_ready owns the retry deadline
             tasks = [asyncio.create_task(_pipe(reader, remote_writer)),
                      asyncio.create_task(_pipe(remote_reader, writer))]
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -296,7 +258,8 @@ async def _wait_http_ready(client, url, timeout):
         except httpx.HTTPError as exc:
             last_error = exc
             await asyncio.sleep(.1)
-    raise RuntimeError(f'target HTTP endpoint did not become ready: {last_error}')
+    raise RuntimeError('target HTTP endpoint did not become ready: '
+                       f'{type(last_error).__name__}: {last_error}')
 
 
 async def _close_target(stack, lifecycle, relay):
@@ -331,13 +294,12 @@ async def open_target(target, values, request_timeout=10):
                     args=[str(resolve_value(arg, values)) for arg in transport.args], env=env)
                 read, write = await stack.enter_async_context(stdio_client(params))
             elif isinstance(transport, ContainerTransport):
-                lifecycle, address, port, needs_relay = _open_container(transport)
-                if needs_relay:
-                    relay = await _localhost_relay(address, port,
-                                                   transport.startup_timeout_seconds)
-                    host_port = relay.sockets[0].getsockname()[1]
-                else:
+                lifecycle, address, port = _open_container(transport)
+                if transport.relay_image:
                     host_port = port
+                else:
+                    relay = await _localhost_relay(address, port)
+                    host_port = relay.sockets[0].getsockname()[1]
                 lifecycle.endpoint = f'127.0.0.1:{host_port}'
                 metadata = lifecycle.metadata()
                 http = await stack.enter_async_context(
