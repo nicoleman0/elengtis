@@ -149,8 +149,31 @@ async def _pipe(reader, writer):
         await writer.wait_closed()
 
 
+class _LocalhostRelay:
+    def __init__(self, server, handlers):
+        self.server = server
+        self.handlers = handlers
+
+    @property
+    def sockets(self):
+        return self.server.sockets
+
+    def close(self):
+        self.server.close()
+        for task in tuple(self.handlers):
+            task.cancel()
+
+    async def wait_closed(self):
+        await self.server.wait_closed()
+        if self.handlers:
+            await asyncio.gather(*tuple(self.handlers), return_exceptions=True)
+
+
 async def _localhost_relay(address, port, timeout):
+    handlers = set()
+
     async def relay(reader, writer):
+        handlers.add(asyncio.current_task())
         try:
             deadline = asyncio.get_running_loop().time() + timeout
             while True:
@@ -168,10 +191,11 @@ async def _localhost_relay(address, port, timeout):
                 task.cancel()
             await asyncio.gather(*done, *pending, return_exceptions=True)
         finally:
+            handlers.discard(asyncio.current_task())
             writer.close()
             await writer.wait_closed()
 
-    return await asyncio.start_server(relay, '127.0.0.1', 0)
+    return _LocalhostRelay(await asyncio.start_server(relay, '127.0.0.1', 0), handlers)
 
 
 @asynccontextmanager

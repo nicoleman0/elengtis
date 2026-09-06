@@ -39,6 +39,7 @@ jobs:
 
   isolated-container:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: astral-sh/setup-uv@v10.0.1
@@ -49,4 +50,4 @@ jobs:
       - name: Build the package for the target image
         run: uv build
       - name: Exercise the isolated MCP target contract
-        run: uv run python tests/docker_target_smoke.py
+        run: timeout --signal=TERM --kill-after=30s 5m uv run python tests/docker_target_smoke.py
