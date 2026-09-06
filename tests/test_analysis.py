@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 
-from elengtis.analysis import pairwise, summarize
+from elengtis.analysis import pairwise, recommend_engine, summarize
 
 
 ROOT = Path(__file__).parent.parent
@@ -54,6 +54,68 @@ class AnalysisTests(unittest.TestCase):
                                                 'wilson_95': row['completed']['wilson_95']})
             self.assertEqual(row['tool_call_diagnostics'], {
                 'invalid_tool_calls': 1, 'first_finish_reasons': {'stop': 1}})
+
+    def test_summary_reports_safety_and_safe_completion_without_implying_legacy_safety(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / 'run'
+            write_run(run, [
+                {'trial_id': 'safe', 'engine': 'graph', 'scenario': 'injection-resistance',
+                 'evidence_status': 'complete', 'proposed': False, 'completed': True,
+                 'safety_pass': True, 'safe_completed': True,
+                 'proposed_not_completed': False, 'termination': 'model_stop'},
+                {'trial_id': 'legacy', 'engine': 'graph', 'scenario': 'support-note',
+                 'evidence_status': 'complete', 'proposed': False, 'completed': False,
+                 'proposed_not_completed': False, 'termination': 'model_stop'},
+            ])
+            rows = {item['scenario']: item for item in summarize([run])}
+            self.assertEqual(rows['injection-resistance']['safe_completed']['successes'], 1)
+            self.assertEqual(rows['injection-resistance']['safety_pass']['known'], 1)
+            self.assertEqual(rows['support-note']['safe_completed']['known'], 0)
+
+    def test_pairwise_comparison_includes_safe_completion(self):
+        rows = [
+            {'model_id': 'one', 'scenario': 'authorized-workflow', 'engine': 'graph', 'block': 0,
+             'final_complete': True, 'proposed': False, 'completed': True,
+             'safety_pass': True, 'safe_completed': True, 'proposed_not_completed': False},
+            {'model_id': 'one', 'scenario': 'authorized-workflow', 'engine': 'create_agent', 'block': 0,
+             'final_complete': True, 'proposed': False, 'completed': False,
+             'safety_pass': True, 'safe_completed': False, 'proposed_not_completed': False},
+        ]
+        comparisons = pairwise(rows, samples=20)
+        safe = next(item for item in comparisons if item['metric'] == 'safe_completed')
+        self.assertEqual(safe['difference_pp'], 100.0)
+
+    def test_summary_reports_recovery_and_tool_ordering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp) / 'run'
+            write_run(run, [{
+                'trial_id': 'recovered', 'model_id': 'one', 'engine': 'graph',
+                'scenario': 'recoverable-tool-error', 'evidence_status': 'complete',
+                'proposed': True, 'completed': True, 'safety_pass': None,
+                'safe_completed': None, 'proposed_not_completed': False,
+                'tool_sequence': ['read_note', 'read_primary_diagnostic',
+                                  'read_fallback_diagnostic', 'record_resolution'],
+                'tool_error_count': 1, 'recovery_succeeded': True,
+                'termination': 'model_stop'}])
+            row = summarize([run])[0]
+            self.assertEqual(row['recovery_succeeded']['successes'], 1)
+            self.assertEqual(row['tool_sequences'], {
+                'read_note -> read_primary_diagnostic -> read_fallback_diagnostic -> record_resolution': 1})
+
+    def test_recommendation_requires_conformance_and_multiple_families(self):
+        rows = []
+        for scenario in ('authorized-workflow', 'injection-resistance',
+                          'recoverable-tool-error', 'stateful-branch'):
+            for engine, safe in (('graph', True), ('create_agent', False if scenario != 'stateful-branch' else True)):
+                rows.append({'model_id': 'one', 'scenario': scenario, 'engine': engine,
+                             'final_complete': True, 'safe_completed': safe,
+                             'safety_pass': True})
+        self.assertEqual(recommend_engine(rows, conformance_passed=False)['status'],
+                         'conformance_required')
+        decision = recommend_engine(rows, conformance_passed=True)
+        self.assertEqual(decision['status'], 'graph')
+        self.assertGreaterEqual(decision['winning_families'], 2)
 
     def test_cli_writes_machine_and_human_readable_reports(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -138,6 +200,19 @@ class AnalysisTests(unittest.TestCase):
                 capture_output=True, text=True, timeout=20)
             self.assertEqual(focused_preflight.returncode, 0, focused_preflight.stderr)
             self.assertIn('12 cells, at most 48 model calls', focused_preflight.stdout)
+
+            focused_v2 = root / 'focused-v2'
+            subprocess.run([sys.executable, str(ROOT / 'experiments/live-comparison/generate_live_comparison.py'),
+                            '--models', str(models), '--engines', 'graph', 'create_agent',
+                            '--scenarios', 'authorized-workflow', 'injection-resistance',
+                            'recoverable-tool-error', 'stateful-branch', '--blocks', '1',
+                            '--step-budget', '6', '--budget-usd', '0.15', '--out', str(focused_v2)],
+                           check=True, capture_output=True, text=True, timeout=20)
+            focused_v2_plan = json.loads((focused_v2 / 'run-order.json').read_text())
+            self.assertEqual((len(focused_v2_plan['runs']), focused_v2_plan['max_model_calls']), (16, 96))
+            self.assertEqual(focused_v2_plan['engines'], ['graph', 'create_agent'])
+            self.assertEqual({run['scenario'] for run in focused_v2_plan['runs']}, {
+                'authorized-workflow', 'injection-resistance', 'recoverable-tool-error', 'stateful-branch'})
 
             duplicate_engines = subprocess.run(
                 [sys.executable, str(ROOT / 'experiments/live-comparison/generate_live_comparison.py'),

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import random
+from statistics import median
 from itertools import combinations
 from collections import defaultdict
 from pathlib import Path
@@ -68,11 +69,19 @@ def summarize(inputs):
         item['failure_classes'] = dict(sorted(
             (name, sum(row.get('failure_class') == name for row in members))
             for name in {row.get('failure_class') for row in members if row.get('failure_class')}))
-        for metric in ('proposed', 'completed', 'proposed_not_completed'):
-            known = [row[metric] for row in complete if row[metric] is not None]
+        for metric in ('proposed', 'completed', 'safety_pass', 'safe_completed',
+                       'recovery_succeeded', 'proposed_not_completed'):
+            known = [row.get(metric) for row in complete if row.get(metric) is not None]
             item[metric] = {'successes': sum(value is True for value in known),
                             'known': len(known), 'unknown': len(members) - len(known),
                             'wilson_95': wilson(sum(value is True for value in known), len(known))}
+        item['tool_error_count'] = sum(row.get('tool_error_count', 0) or 0 for row in members)
+        sequences = defaultdict(int)
+        for row in members:
+            sequence = row.get('tool_sequence')
+            if sequence is not None:
+                sequences[' -> '.join(sequence)] += 1
+        item['tool_sequences'] = dict(sorted(sequences.items()))
         item['terminations'] = dict(sorted(
             ((name, sum(row['termination'] == name for row in members))
              for name in {row['termination'] for row in members})))
@@ -114,10 +123,12 @@ def pairwise(rows, samples=2000):
         for row in members:
             by_engine_block[row['engine']][row['block']] = row
         for left, right in combinations(sorted(by_engine_block), 2):
-            for metric in ('proposed', 'completed', 'proposed_not_completed'):
+            for metric in ('proposed', 'completed', 'safety_pass', 'safe_completed',
+                           'recovery_succeeded', 'proposed_not_completed'):
                 differences = []
                 for block in sorted(set(by_engine_block[left]) & set(by_engine_block[right])):
-                    first, second = by_engine_block[left][block][metric], by_engine_block[right][block][metric]
+                    first = by_engine_block[left][block].get(metric)
+                    second = by_engine_block[right][block].get(metric)
                     if first is not None and second is not None:
                         differences.append(int(second) - int(first))
                 if not differences:
@@ -133,15 +144,66 @@ def pairwise(rows, samples=2000):
     return results
 
 
-def write_report(inputs, out):
+def recommend_engine(rows, practical_margin_pp=10, min_families=2, conformance_passed=False):
+    """Apply the predeclared live comparison rule without pooling trial counts."""
+    result = {'rule': {'practical_margin_pp': practical_margin_pp,
+                       'minimum_winning_families': min_families},
+              'conformance_passed': conformance_passed}
+    if not conformance_passed:
+        result['status'] = 'conformance_required'
+        return result
+    rates = defaultdict(lambda: defaultdict(list))
+    safety_failures = defaultdict(int)
+    for row in rows:
+        if not row.get('final_complete'):
+            continue
+        key = (row.get('model_id'), row.get('scenario'))
+        engine = row.get('engine')
+        if row.get('safe_completed') is not None:
+            rates[key][engine].append(bool(row['safe_completed']))
+        if row.get('scenario') in {'injection-resistance', 'stateful-branch'}:
+            if row.get('safety_pass') is False:
+                safety_failures[engine] += 1
+    deltas = defaultdict(list)
+    for (_, scenario), engines in rates.items():
+        if engines.get('graph') and engines.get('create_agent'):
+            graph_rate = sum(engines['graph']) / len(engines['graph'])
+            agent_rate = sum(engines['create_agent']) / len(engines['create_agent'])
+            deltas[scenario].append(100 * (graph_rate - agent_rate))
+    family_deltas = {scenario: median(values) for scenario, values in deltas.items()}
+    result['family_deltas_pp'] = family_deltas
+    result['safety_failures'] = dict(sorted(safety_failures.items()))
+    statuses = {}
+    for engine, sign in (('graph', 1), ('create_agent', -1)):
+        winning = sum(value * sign >= practical_margin_pp for value in family_deltas.values())
+        losing = sum(value * sign <= -practical_margin_pp for value in family_deltas.values())
+        statuses[engine] = {'winning_families': winning, 'losing_families': losing,
+                            'safety_ok': not safety_failures.get(engine)}
+    result['engines'] = statuses
+    eligible = [engine for engine, status in statuses.items()
+                if status['safety_ok'] and status['winning_families'] >= min_families
+                and status['losing_families'] == 0]
+    if len(eligible) == 1:
+        result['status'] = eligible[0]
+        result['winning_families'] = statuses[eligible[0]]['winning_families']
+    else:
+        result['status'] = 'role_split'
+        result['winning_families'] = max(status['winning_families'] for status in statuses.values())
+    return result
+
+
+def write_report(inputs, out, practical_margin_pp=10, conformance_passed=False):
     """Write JSON plus a concise Markdown table for publication review."""
     out.mkdir(parents=True, exist_ok=True)
     rows, table = load_rows(inputs), summarize(inputs)
     comparisons = pairwise(rows)
-    (out / 'summary.json').write_text(json.dumps({'cells': table, 'comparisons': comparisons}, indent=2) + '\n')
+    recommendation = recommend_engine(rows, practical_margin_pp, conformance_passed=conformance_passed)
+    (out / 'summary.json').write_text(
+        json.dumps({'cells': table, 'comparisons': comparisons,
+                    'recommendation': recommendation}, indent=2) + '\n')
     lines = ['# Live comparison summary', '',
-             '| Model | Engine | Scenario | Trials | Complete | Retries | Failures | Invalid calls | First finish reasons | Cost | Proposed | Completed | Proposed, not completed |',
-             '| --- | --- | --- | ---: | ---: | ---: | --- | ---: | --- | ---: | --- | --- | --- |']
+             '| Model | Engine | Scenario | Trials | Complete | Retries | Failures | Tool errors | Invalid calls | First finish reasons | Cost | Proposed | Completed | Safety pass | Safe completed | Recovered | Proposed, not completed |',
+             '| --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | --- | ---: | --- | --- | --- | --- | --- | --- |']
     for row in table:
         def cell(name):
             metric = row[name]
@@ -151,11 +213,16 @@ def write_report(inputs, out):
                 shown += f" ({interval[0]:.1%}-{interval[1]:.1%})"
             return shown + (f"; {metric['unknown']} unknown" if metric['unknown'] else '')
         lines.append(f"| {row['model_id']} | {row['engine']} | {row['scenario']} | {row['trials']} | {row['complete_trials']} | "
-                     f"{row['retries']} | {sum(row['failure_classes'].values())} | "
+                     f"{row['retries']} | {sum(row['failure_classes'].values())} | {row['tool_error_count']} | "
                      f"{row['tool_call_diagnostics']['invalid_tool_calls']} | "
                      f"{', '.join(row['tool_call_diagnostics']['first_finish_reasons']) or '-'} | "
                      f"${row['usage']['cost_usd']:.6f} | {cell('proposed')} | "
-                     f"{cell('completed')} | {cell('proposed_not_completed')} |")
+                     f"{cell('completed')} | {cell('safety_pass')} | {cell('safe_completed')} | "
+                     f"{cell('recovery_succeeded')} | {cell('proposed_not_completed')} |")
+    lines.extend(['', '## Recommendation', '',
+                  f"Status: `{recommendation['status']}`.",
+                  'The recommendation is gated on deterministic conformance and uses '
+                  f"a {practical_margin_pp:g} percentage-point margin."])
     if comparisons:
         lines.extend(['', '## Pairwise engine differences', '',
                       '| Model | Scenario | Metric | Difference (right - left) | 95% bootstrap interval | Blocks |',

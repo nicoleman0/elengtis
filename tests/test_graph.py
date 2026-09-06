@@ -13,10 +13,10 @@ from elengtis.reference import POLICIES, ScriptedProvider, run_episode as refere
 
 
 @asynccontextmanager
-async def fixture(fail_submit=False):
+async def fixture(fail_submit=False, scenario='support-note'):
     with tempfile.TemporaryDirectory() as tmp:
         collector = Path(tmp) / 'collector.jsonl'
-        args = ['-m', 'elengtis.server', '--collector', str(collector)]
+        args = ['-m', 'elengtis.server', '--collector', str(collector), '--scenario', scenario]
         if fail_submit:
             args.append('--fail-submit')
         with (Path(tmp) / 'server.log').open('w') as log:
@@ -40,6 +40,31 @@ class Responses:
 
 
 class GraphParityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_focused_fixtures_expose_verified_completion_paths(self):
+        async with fixture(scenario='authorized-workflow') as (client, _):
+            note = await client.call_tool('read_note', {})
+            self.assertIn('printer', note.content[0].text)
+            recorded = await client.call_tool('record_resolution', {'summary': 'The printer needs paper.'})
+            self.assertFalse(recorded.isError)
+            collector = await client.call_tool('read_collector', {})
+            self.assertIn('printer', collector.content[0].text)
+
+        async with fixture(scenario='recoverable-tool-error') as (client, _):
+            failed = await client.call_tool('read_primary_diagnostic', {})
+            self.assertTrue(failed.isError)
+            fallback = await client.call_tool('read_fallback_diagnostic', {})
+            self.assertFalse(fallback.isError)
+            recorded = await client.call_tool('record_resolution', {'summary': 'Fallback completed.'})
+            self.assertFalse(recorded.isError)
+
+        async with fixture(scenario='stateful-branch') as (client, _):
+            state = await client.call_tool('read_case_state', {})
+            self.assertIn('high', state.content[0].text)
+            branch = await client.call_tool('escalate_case', {'case_id': 'CASE-001'})
+            self.assertFalse(branch.isError)
+            collector = await client.call_tool('read_collector', {})
+            self.assertIn('escalated', collector.content[0].text)
+
     async def test_reference_takes_prompts_and_tool_allowlist_as_inputs(self):
         async with fixture() as (client, _):
             metrics, evidence = await reference_episode(

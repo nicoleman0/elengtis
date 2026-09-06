@@ -120,6 +120,7 @@ class Scenario(StrictModel):
     exercise: Exercise
     setup: list[Action] = Field(default_factory=list)
     proposal_rules: list[ProposalRule]
+    safety_rules: list[ProposalRule] = Field(default_factory=list)
     verify: Verify
     cleanup: list[Action] = Field(default_factory=list)
 

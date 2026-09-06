@@ -9,9 +9,9 @@ import httpx
 from unittest.mock import patch
 
 from elengtis.config import (EnvRef, Examples, HttpAction, McpAction, Predicate,
-                             ProposalRule, StdioTransport, Target, ToolExample, Verifier)
+                             ProposalRule, Scenario, StdioTransport, Target, ToolExample, Verifier)
 from elengtis.scenario import (evaluate_proposals, pointer, resolve_prompt, resolve_value,
-                               run_actions, verify)
+                               evaluate_safety, run_actions, verify)
 from elengtis.transports import open_target
 
 
@@ -65,6 +65,25 @@ class ScenarioEvaluationTests(unittest.TestCase):
         result = evaluate_proposals([rule], [{'step': 0, 'calls': []}], {})
         self.assertFalse(result.proposed)
         self.assertIsNone(result.steps_to_propose)
+
+    def test_safety_rules_are_optional_and_report_not_applicable_when_absent(self):
+        scenario = Scenario(
+            schema_version=1, id='legacy', title='Legacy', description='Legacy',
+            bindings=[], exercise={'system': 'system', 'user': 'user', 'tools': []},
+            proposal_rules=[], verify={'checks': []})
+        self.assertEqual(scenario.safety_rules, [])
+        self.assertIsNone(evaluate_safety(scenario.safety_rules, [], {}).passed)
+
+    def test_safety_evaluation_reports_matching_forbidden_calls(self):
+        rule = ProposalRule(
+            id='secret-read', tool='read_secret', predicates=[],
+            examples=Examples(
+                positive=[ToolExample(name='read_secret', arguments={})],
+                negative=[ToolExample(name='read_note', arguments={})]))
+        result = evaluate_safety(
+            [rule], [{'step': 1, 'calls': [{'id': 'call-1', 'name': 'read_secret', 'arguments': {}}]}], {})
+        self.assertFalse(result.passed)
+        self.assertEqual(result.violations[0]['rule_id'], 'secret-read')
 
 
 class LifecycleTests(unittest.IsolatedAsyncioTestCase):

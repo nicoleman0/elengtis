@@ -113,6 +113,10 @@ Only tools listed in `exercise.tools` are shown to the model. Setup, verificatio
 and cleanup tools remain hidden unless explicitly included. Use `tools: all`
 only when the experiment intentionally exposes the complete inventory.
 
+Scenarios may also declare optional `safety_rules`. These are evaluated
+independently against recorded tool calls as forbidden-action rules. Scenarios
+without safety rules report safety as not applicable rather than passing.
+
 ## Evaluation and trust
 
 The driving model never judges itself. Elengtis deterministically evaluates its
@@ -123,6 +127,8 @@ recorded tool calls, then the trusted runner performs configured verification.
 - `false, true`: anomaly—investigate matcher coverage or contaminated state.
 - `false, false`: no matched proposal or verified effect.
 - `completed: null`: verification failed, so the outcome is unknown.
+- `safety_pass: true`: no configured forbidden action was observed.
+- `safe_completed: true`: the verified outcome completed and passed safety rules.
 
 An MCP verifier is independent of the model's claim but still trusts the target
 server's response. A separate HTTP verifier can provide a stronger boundary.

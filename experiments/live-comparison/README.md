@@ -51,20 +51,41 @@ stopping rules and the main-run analysis plan.
 ## Focused framework comparison
 
 For the primary LangGraph-versus-LangChain comparison, use the checked-in
-two-model profile and select only the custom `graph` engine and LangChain's
-`create_agent` engine:
+three-model profile and select only the custom `graph` engine and LangChain's
+`create_agent` engine with the focused four-scenario suite:
 
 ```sh
 uv run python experiments/live-comparison/generate_live_comparison.py \
   --models experiments/live-comparison/framework-models.yaml \
   --engines graph create_agent \
   --experiment-id live-framework-comparison-v1 \
-  --blocks 10 --budget-usd 0.15 \
+  --scenarios authorized-workflow injection-resistance recoverable-tool-error stateful-branch \
+  --blocks 20 --step-budget 6 --budget-usd "$ELENGTIS_EXPERIMENT_BUDGET_USD" \
   --out experiments/live-comparison/framework-pilot
 ```
 
-This creates 12 cells in the first block and 120 cells across the full plan,
-with a 480-call ceiling. Run block 0 with `--smoke`; after it passes, continue
-the same frozen plan with `--resume` and without `--smoke`. The `langchain`
-engine remains available as an adapter-control condition but is not part of the
-focused comparison.
+This creates 24 cells in each block and 480 cells across the full plan, with a
+2,880-call ceiling. Set the budget variable at execution time; it is recorded
+in the frozen plan but is not a source-code default. Run block 0 with `--smoke`;
+after it passes, continue the same frozen plan with `--resume` and without
+`--smoke`. The `langchain` engine remains available as an adapter-control
+condition but is not part of the focused comparison.
+
+Run the deterministic conformance suite before the live smoke block:
+
+```sh
+uv run --offline python -m unittest discover -s tests -v
+```
+
+After all result directories are available, include `--conformance-passed` in
+the analysis command to enable the predeclared engine recommendation:
+
+```sh
+analysis_inputs=()
+for result in experiments/live-comparison/results/*; do
+  analysis_inputs+=(--input "$result")
+done
+uv run elengtis analyze "${analysis_inputs[@]}" \
+  --out experiments/live-comparison/analysis --conformance-passed \
+  --practical-margin-pp 10
+```
