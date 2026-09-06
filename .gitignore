@@ -1,5 +1,6 @@
 PLAN.md
 .venv/
+.worktrees/
 __pycache__/
 *.pyc
 dist/
