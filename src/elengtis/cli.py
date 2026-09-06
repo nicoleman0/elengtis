@@ -7,12 +7,13 @@ from importlib.resources import files
 from importlib.metadata import version
 from pathlib import Path
 
-from elengtis.config import Campaign, CampaignBundle, Scenario, load_campaign, plan_trials, write_schemas
+from elengtis.config import (Campaign, CampaignBundle, ContainerTransport, Scenario,
+                             load_campaign, plan_trials, write_schemas)
 from elengtis.budget import BudgetExceeded
 from elengtis.reference import ScriptedProvider
 from elengtis.scenario import (evaluate_proposals, evaluate_safety, resolve_prompt,
                                resolve_value, run_actions, verify)
-from elengtis.transports import open_target
+from elengtis.transports import agent_tools, open_target, target_metadata, unmanaged_target_metadata
 
 SCHEMA_VERSION, METRICS_VERSION, MAX_CONSECUTIVE_TARGET_FAILURES = 5, 3, 3
 ENGINES = {'reference': ('reference', 'run_episode'), 'graph': ('graph', 'run_episode'),
@@ -133,6 +134,9 @@ async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
                 values = dict(trial.bindings) | {'canary': canary, 'trial_dir': tmp,
                                                   'collector': str(Path(tmp) / 'collector.jsonl')}
                 setup = cleanup = None
+                target_info = (unmanaged_target_metadata()
+                               if trial.target.transport.type == 'streamable_http' else {})
+                opened_client = None
                 evidence = {'tools': [], 'requests': [], 'messages': [], 'trajectory': [], 'usage': [],
                             'response_diagnostics': [], 'safety_evaluation': None}
                 errors, proposed, completed, safety_pass, steps = [], None, None, None, None
@@ -143,6 +147,7 @@ async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
                 budget_before = budget.committed if budget else 0.0
                 try:
                     async with open_target(trial.target, values) as client:
+                        opened_client = client
                         setup = await run_actions(trial.scenario.setup, client, values, 'setup')
                         errors.extend(setup.errors)
                         try:
@@ -190,7 +195,13 @@ async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
                     termination = 'infrastructure_error'
                     errors.append({'phase': 'connection_or_agent', 'detail': f'{type(exc).__name__}: {exc}'})
                     evidence['traceback'] = traceback.format_exc()
+                if opened_client is not None:
+                    target_info = target_metadata(opened_client)
+                if target_info.get('cleanup', {}).get('ok') is False:
+                    errors.append({'phase': 'target_cleanup',
+                                   'detail': '; '.join(target_info['cleanup']['errors'])})
                 evidence['usage'] = usage
+                evidence['target_execution'] = target_info
                 document = {'schema_version': SCHEMA_VERSION, 'run_id': run_id,
                             'trial_id': trial.trial_id, 'attempt_id': attempt_id,
                             'target': trial.target.id, 'scenario': trial.scenario.id,
@@ -198,7 +209,8 @@ async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
                             'cleanup': cleanup.records if cleanup else [], **evidence, 'errors': errors}
                 (out / evidence_name).write_text(json.dumps(document, indent=2) + '\n')
                 fatal = (termination in {'provider_error', 'infrastructure_error', 'budget_exhausted'} or
-                         any(error.get('phase') in {'setup', 'verification', 'cleanup', 'connection_or_agent'}
+                         any(error.get('phase') in {'setup', 'verification', 'cleanup',
+                                                     'target_cleanup', 'connection_or_agent'}
                              for error in errors))
                 terminal = (setup is not None and not setup.errors and proposed is not None and
                             completed is not None and not fatal)
@@ -258,6 +270,7 @@ def build_parser():
     parser = argparse.ArgumentParser(prog='elengtis')
     commands = parser.add_subparsers(dest='command', required=True)
     check = commands.add_parser('validate'); check.add_argument('config', type=Path)
+    preflight = commands.add_parser('preflight'); preflight.add_argument('config', type=Path)
     schema = commands.add_parser('schema'); schema.add_argument('--out', type=Path, required=True)
     analyze = commands.add_parser('analyze'); analyze.add_argument('--input', type=Path, action='append', required=True)
     analyze.add_argument('--out', type=Path, required=True)
@@ -268,6 +281,27 @@ def build_parser():
     run.add_argument('--step-budget', type=int); run.add_argument('--engine', choices=tuple(ENGINES)); run.add_argument('--model')
     example = commands.add_parser('example'); example.add_argument('--out', type=Path, required=True)
     return parser
+
+
+async def preflight(bundle):
+    """Check target reachability and tool contracts without running scenarios."""
+    for target in bundle.campaign.targets:
+        values = {'canary': 'ELENGTIS-PREFLIGHT', 'trial_dir': tempfile.gettempdir()}
+        async with open_target(target, values) as client:
+            for scenario in bundle.scenarios:
+                await agent_tools(client, resolve_value(scenario.exercise.tools,
+                                                        target.bindings[scenario.id]))
+        metadata = target_metadata(client)
+        if isinstance(target.transport, ContainerTransport):
+            if not metadata.get('cleanup', {}).get('ok', False):
+                raise RuntimeError(f'target {target.id} did not clean up its container')
+            print(f'{target.id}: isolated container preflight passed')
+        elif target.transport.type == 'streamable_http':
+            print(f'WARNING: {target.id} is externally managed; reset and isolation are not asserted',
+                  file=sys.stderr)
+            print(f'{target.id}: remote tool preflight passed')
+        else:
+            print(f'{target.id}: stdio target preflight passed')
 
 
 def main():
@@ -283,6 +317,8 @@ def main():
             write_report(args.input, args.out, args.practical_margin_pp, args.conformance_passed); return
         if args.command == 'validate':
             print('\n'.join(t.trial_id for t in plan_trials(load_campaign(args.config)))); return
+        if args.command == 'preflight':
+            asyncio.run(preflight(load_campaign(args.config))); return
         if args.command == 'example':
             bundle, run_id, prior = load_campaign(Path(str(files('elengtis').joinpath('examples/offline.yaml')))), None, ()
             asyncio.run(run_matrix(bundle, args.out, run_id, prior)); return

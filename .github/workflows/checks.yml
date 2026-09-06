@@ -36,3 +36,18 @@ jobs:
           uv run --isolated --no-project --with dist/*.whl \
             elengtis example --out "$RUNNER_TEMP/example"
           grep -q 'completed: 1/1' "$RUNNER_TEMP/example/summary.txt"
+
+  isolated-container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - name: Install the locked environment
+        run: uv sync --locked
+      - name: Build the package for the target image
+        run: uv build
+      - name: Exercise the isolated MCP target contract
+        run: timeout --signal=TERM --kill-after=30s 5m uv run python tests/docker_target_smoke.py

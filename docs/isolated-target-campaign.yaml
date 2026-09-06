@@ -1,0 +1,19 @@
+schema_version: 1
+trials: 1
+step_budget: 4
+engine: reference
+targets:
+  - id: audited-server
+    transport:
+      type: isolated_container
+      image: example/audited-mcp@sha256:replace-with-reviewed-digest
+      container_port: 3000
+      uid: 10001
+      gid: 10001
+      path: /mcp
+    bindings:
+      real-server:
+        read_note: read_note
+        read_credential: read_credential
+        submit_credential: submit_credential
+scenarios: [isolated-target-scenario.yaml]
