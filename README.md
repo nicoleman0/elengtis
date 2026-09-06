@@ -10,6 +10,23 @@ It is a scenario-based research tool, not an automatic proof that a server is
 secure. It detects behavior described by its rules; it does not discover every
 possible injection.
 
+## Choosing an engine
+
+Use `create_agent` as the default for straightforward agents. It is the
+easiest LangChain path to a capable tool-using agent and is the recommended
+starting point for new campaigns.
+
+Choose `graph` when the workflow itself needs explicit control: shared state,
+conditional branching, recovery after tool errors, strict tool ordering,
+bounded turn-by-turn execution, or evidence-sensitive transitions. `graph` is
+the lower-level LangGraph path and makes those mechanics visible and
+programmable.
+
+This is a role distinction, not a claim that one engine is universally safer.
+The framework capability experiment found no practical universal winner:
+`create_agent` is the simpler default, while `graph` is the controlled-workflow
+option.
+
 ## Quick start
 
 Install [uv](https://docs.astral.sh/uv/) and Python 3.12, then:
@@ -33,7 +50,7 @@ them into a stable `target × scenario × trial` matrix.
 schema_version: 1
 trials: 3
 step_budget: 4
-engine: graph
+engine: create_agent
 model: openai/gpt-5-mini
 targets:
   - id: research-server
@@ -113,6 +130,10 @@ Only tools listed in `exercise.tools` are shown to the model. Setup, verificatio
 and cleanup tools remain hidden unless explicitly included. Use `tools: all`
 only when the experiment intentionally exposes the complete inventory.
 
+Scenarios may also declare optional `safety_rules`. These are evaluated
+independently against recorded tool calls as forbidden-action rules. Scenarios
+without safety rules report safety as not applicable rather than passing.
+
 ## Evaluation and trust
 
 The driving model never judges itself. Elengtis deterministically evaluates its
@@ -123,6 +144,8 @@ recorded tool calls, then the trusted runner performs configured verification.
 - `false, true`: anomaly—investigate matcher coverage or contaminated state.
 - `false, false`: no matched proposal or verified effect.
 - `completed: null`: verification failed, so the outcome is unknown.
+- `safety_pass: true`: no configured forbidden action was observed.
+- `safe_completed: true`: the verified outcome completed and passed safety rules.
 
 An MCP verifier is independent of the model's claim but still trusts the target
 server's response. A separate HTTP verifier can provide a stronger boundary.
@@ -169,9 +192,19 @@ and allowed tools. They return orchestration observations only. One scenario
 evaluator assigns proposal and completion meaning afterward, preventing four
 implementations of the experiment's semantics.
 
-The explicit `graph` engine currently best preserves sequential dispatch and
-turn-budget behavior. `create_agent` may dispatch several calls concurrently;
-that difference remains a recorded experimental condition.
+`create_agent` is the recommended default for straightforward agents. It may
+dispatch several tool calls concurrently, which is useful for ordinary
+tool-using work but can be the wrong fit when order or intermediate state is
+part of the contract.
+
+The explicit `graph` engine is for workflows where sequential dispatch,
+turn-budget behavior, state transitions, branching, recovery, or evidence
+control must be represented directly. Its extra control comes with more
+orchestration to define and maintain.
+
+`reference` is the deterministic baseline used by conformance tests, and
+`langchain` is an adapter-control condition for experiments; neither is the
+recommended application default.
 
 ## Dashboard schema
 

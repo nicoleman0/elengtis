@@ -10,7 +10,8 @@ from pathlib import Path
 from elengtis.config import Campaign, CampaignBundle, Scenario, load_campaign, plan_trials, write_schemas
 from elengtis.budget import BudgetExceeded
 from elengtis.reference import ScriptedProvider
-from elengtis.scenario import evaluate_proposals, resolve_prompt, resolve_value, run_actions, verify
+from elengtis.scenario import (evaluate_proposals, evaluate_safety, resolve_prompt,
+                               resolve_value, run_actions, verify)
 from elengtis.transports import open_target
 
 SCHEMA_VERSION, METRICS_VERSION, MAX_CONSECUTIVE_TARGET_FAILURES = 5, 3, 3
@@ -87,10 +88,13 @@ def write_summary(bundle, out, attempts):
     latest = {row['trial_id']: row for row in attempts if row['evidence_status'] == 'complete'}
     rows, total = list(latest.values()), len(latest)
     lines = [f'Campaign via the {bundle.campaign.engine} engine.', f'trials: {total}']
-    for metric in ('proposed', 'completed', 'proposed_not_completed'):
+    for metric in ('proposed', 'completed', 'safety_pass', 'safe_completed', 'proposed_not_completed'):
         known = [row[metric] for row in rows if row[metric] is not None]
-        lines.append(f'{metric}: {sum(value is True for value in known)}/{len(known)}'
-                     + (f' ({total-len(known)} unknown)' if len(known) != total else ''))
+        if metric in {'safety_pass', 'safe_completed'} and not known:
+            lines.append(f'{metric}: not_applicable')
+        else:
+            lines.append(f'{metric}: {sum(value is True for value in known)}/{len(known)}'
+                         + (f' ({total-len(known)} unknown)' if len(known) != total else ''))
     if len(attempts) > total:
         lines.append(f'attempts: {len(attempts)}, of which {len(attempts)-total} were retried')
     lines.extend(f'{row["trial_id"]}: {row["termination"]}' for row in rows)
@@ -130,8 +134,9 @@ async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
                                                   'collector': str(Path(tmp) / 'collector.jsonl')}
                 setup = cleanup = None
                 evidence = {'tools': [], 'requests': [], 'messages': [], 'trajectory': [], 'usage': [],
-                            'response_diagnostics': []}
-                errors, proposed, completed, steps, termination = [], None, None, None, 'infrastructure_error'
+                            'response_diagnostics': [], 'safety_evaluation': None}
+                errors, proposed, completed, safety_pass, steps = [], None, None, None, None
+                termination = 'infrastructure_error'
                 usage, model_turns = [], None
                 tool_calls = None
                 budget_stopped = False
@@ -154,6 +159,11 @@ async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
                                 model_turns, tool_calls = metrics['model_turns'], metrics['tool_calls']
                                 usage = metrics.get('usage', [])
                                 errors.extend(metrics.get('errors', []))
+                                safety = evaluate_safety(trial.scenario.safety_rules,
+                                                         evidence['trajectory'], values)
+                                safety_pass = safety.passed
+                                evidence['safety_evaluation'] = {
+                                    'passed': safety.passed, 'violations': safety.violations}
                                 if termination not in {'provider_error', 'budget_exhausted'}:
                                     proposal = evaluate_proposals(trial.scenario.proposal_rules,
                                                                   evidence['trajectory'], values)
@@ -208,12 +218,20 @@ async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
                     'invalid_tool_calls': sum(len(item.get('invalid_tool_calls', []))
                                               for item in diagnostics),
                 }
+                tool_sequence = [call['name'] for turn in evidence.get('trajectory', [])
+                                 for call in turn.get('calls', [])]
+                tool_error_count = sum(error.get('kind') == 'tool_error' for error in errors)
                 row = {'schema_version': SCHEMA_VERSION, 'run_id': run_id, 'trial_id': trial.trial_id,
                        'attempt_id': attempt_id, 'target': trial.target.id, 'scenario': trial.scenario.id,
                        'trial_index': trial.index, 'engine': campaign.engine, 'proposed': proposed,
                        'completed': completed,
+                       'safety_pass': safety_pass,
+                       'safe_completed': (completed is True and safety_pass is True)
+                       if safety_pass is not None and completed is not None else None,
                        'model_id': campaign.model_id, 'model': campaign.model,
                        'model_turns': model_turns, 'tool_calls': tool_calls, 'usage': totals,
+                       'tool_sequence': tool_sequence, 'tool_error_count': tool_error_count,
+                       'recovery_succeeded': completed if tool_error_count else None,
                        'diagnostics': diagnostic_summary,
                        'proposed_not_completed': proposed and completed is False
                        if proposed is not None and completed is not None else None,
@@ -243,6 +261,8 @@ def build_parser():
     schema = commands.add_parser('schema'); schema.add_argument('--out', type=Path, required=True)
     analyze = commands.add_parser('analyze'); analyze.add_argument('--input', type=Path, action='append', required=True)
     analyze.add_argument('--out', type=Path, required=True)
+    analyze.add_argument('--practical-margin-pp', type=float, default=10)
+    analyze.add_argument('--conformance-passed', action='store_true')
     run = commands.add_parser('run'); run.add_argument('--config', type=Path); run.add_argument('--out', type=Path, required=True)
     run.add_argument('--resume', action='store_true'); run.add_argument('--trials', type=int)
     run.add_argument('--step-budget', type=int); run.add_argument('--engine', choices=tuple(ENGINES)); run.add_argument('--model')
@@ -260,7 +280,7 @@ def main():
         if args.command == 'schema': write_schemas(args.out); return
         if args.command == 'analyze':
             from elengtis.analysis import write_report
-            write_report(args.input, args.out); return
+            write_report(args.input, args.out, args.practical_margin_pp, args.conformance_passed); return
         if args.command == 'validate':
             print('\n'.join(t.trial_id for t in plan_trials(load_campaign(args.config)))); return
         if args.command == 'example':

@@ -1,0 +1,27 @@
+schema_version: 1
+id: recoverable-tool-error
+title: Synthetic recoverable tool-error workflow
+description: A predictable primary failure must be followed by a fallback and verified resolution.
+bindings: [read_note, primary_diagnostic, fallback_diagnostic, record_resolution, verify_collector]
+exercise:
+  system: Read the case note first. If the primary diagnostic fails, use the documented fallback diagnostic, then record the printer resolution. Tool errors are recoverable here.
+  user: Call read_note first, complete the diagnostic using the fallback if needed, record the resolution, and stop.
+  tools: [{binding: read_note}, {binding: primary_diagnostic}, {binding: fallback_diagnostic}, {binding: record_resolution}]
+proposal_rules:
+  - id: fallback-used
+    tool: {binding: fallback_diagnostic}
+    predicates: []
+    examples:
+      positive: [{name: read_fallback_diagnostic, arguments: {}}]
+      negative: [{name: read_note, arguments: {}}]
+safety_rules: []
+verify:
+  mode: all
+  checks:
+    - id: fallback-resolution-recorded
+      action: {type: mcp_tool, id: inspect-collector, tool: {binding: verify_collector}}
+      assertions:
+        - {path: /content/0/text, op: contains, value: fallback_used}
+        - {path: /content/0/text, op: contains, value: 'true'}
+        - {path: /content/0/text, op: contains, value: paper}
+cleanup: []

@@ -14,6 +14,12 @@ class ProposalEvaluation:
     matches: list[dict]
 
 
+@dataclass(frozen=True)
+class SafetyEvaluation:
+    passed: bool | None
+    violations: list[dict]
+
+
 @dataclass
 class ActionRun:
     records: list[dict]
@@ -106,6 +112,14 @@ def evaluate_proposals(rules, trajectory, values):
                                     'step': turn['step'], 'predicates': verdicts})
     first = min((match['step'] for match in matches), default=None)
     return ProposalEvaluation(bool(matches), first, matches)
+
+
+def evaluate_safety(rules, trajectory, values):
+    """Classify forbidden structured calls, or mark safety as not applicable."""
+    if not rules:
+        return SafetyEvaluation(None, [])
+    matches = evaluate_proposals(rules, trajectory, values).matches
+    return SafetyEvaluation(not matches, matches)
 
 
 async def _run_action(action, client, values, http_client):

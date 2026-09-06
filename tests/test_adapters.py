@@ -23,10 +23,10 @@ def call_names(evidence):
     return [call['name'] for turn in evidence['trajectory'] for call in turn['calls']]
 
 
-async def episodes(runner, provider_factory, budget, fail_submit=False):
+async def episodes(runner, provider_factory, budget, fail_submit=False, scenario='support-note'):
     outputs = []
     for engine in (reference_episode, runner):
-        async with fixture(fail_submit) as (client, _):
+        async with fixture(fail_submit, scenario) as (client, _):
             outputs.append(await engine(provider_factory(), 'scripted/test', client, budget))
     return outputs
 
@@ -140,6 +140,65 @@ class CreateAgentTests(unittest.IsolatedAsyncioTestCase):
             run_agent_episode, lambda: Responses([RuntimeError('synthetic model failure')]), 4))[1]
         self.assertEqual(metrics['termination'], 'provider_error')
         self.assertEqual(metrics['model_turns'], 1)
+
+
+class FocusedConformanceTests(unittest.IsolatedAsyncioTestCase):
+    async def run_focused(self, runner, scenario, responses, allowed_tools):
+        async with fixture(scenario=scenario) as (client, _):
+            return await runner(Responses(responses), 'scripted/test', client, 6,
+                                 allowed_tools=allowed_tools)
+
+    async def test_both_engines_complete_authorized_workflow_tape(self):
+        responses = [
+            {'tool_calls': [{'name': 'read_note', 'arguments': {}}]},
+            {'tool_calls': [{'name': 'record_resolution', 'arguments': {
+                'summary': 'The printer needs paper.'}}]},
+            {'content': 'recorded', 'tool_calls': []},
+        ]
+        for runner in (langchain_episode, run_agent_episode):
+            with self.subTest(runner=runner.__name__):
+                metrics, evidence = await self.run_focused(
+                    runner, 'authorized-workflow', responses,
+                    ['read_note', 'record_resolution'])
+                self.assertEqual(metrics['termination'], 'model_stop')
+                self.assertEqual(metrics['tool_calls'], 2)
+                self.assertEqual([call['name'] for turn in evidence['trajectory']
+                                  for call in turn['calls']], ['read_note', 'record_resolution'])
+
+    async def test_both_engines_recover_from_primary_tool_error(self):
+        responses = [
+            {'tool_calls': [{'name': 'read_note', 'arguments': {}}]},
+            {'tool_calls': [{'name': 'read_primary_diagnostic', 'arguments': {}}]},
+            {'tool_calls': [{'name': 'read_fallback_diagnostic', 'arguments': {}}]},
+            {'tool_calls': [{'name': 'record_resolution', 'arguments': {
+                'summary': 'Fallback says the printer needs paper.'}}]},
+            {'content': 'recorded', 'tool_calls': []},
+        ]
+        for runner in (langchain_episode, run_agent_episode):
+            with self.subTest(runner=runner.__name__):
+                metrics, evidence = await self.run_focused(
+                    runner, 'recoverable-tool-error', responses,
+                    ['read_note', 'read_primary_diagnostic', 'read_fallback_diagnostic',
+                     'record_resolution'])
+                self.assertEqual(metrics['termination'], 'model_stop')
+                self.assertEqual(len([error for error in metrics['errors']
+                                     if error['kind'] == 'tool_error']), 1)
+                self.assertEqual(metrics['tool_calls'], 4)
+
+    async def test_both_engines_follow_stateful_branch_tape(self):
+        responses = [
+            {'tool_calls': [{'name': 'read_case_state', 'arguments': {}}]},
+            {'tool_calls': [{'name': 'escalate_case', 'arguments': {'case_id': 'CASE-001'}}]},
+            {'content': 'escalated', 'tool_calls': []},
+        ]
+        for runner in (langchain_episode, run_agent_episode):
+            with self.subTest(runner=runner.__name__):
+                metrics, evidence = await self.run_focused(
+                    runner, 'stateful-branch', responses,
+                    ['read_case_state', 'escalate_case', 'close_case'])
+                self.assertEqual(metrics['termination'], 'model_stop')
+                self.assertEqual([call['name'] for turn in evidence['trajectory']
+                                  for call in turn['calls']], ['read_case_state', 'escalate_case'])
 
 
 class LiveProviderTests(unittest.IsolatedAsyncioTestCase):
