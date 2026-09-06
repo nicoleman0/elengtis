@@ -35,7 +35,19 @@ class HttpTransport(StrictModel):
     headers: dict[str, EnvRef] = Field(default_factory=dict)
 
 
-Transport = StdioTransport | HttpTransport
+class ContainerTransport(StrictModel):
+    type: Literal['isolated_container']
+    image: str = Field(min_length=1)
+    container_port: int = Field(ge=1, le=65535)
+    uid: int = Field(gt=0)
+    gid: int = Field(gt=0)
+    command: list[str] = Field(default_factory=list)
+    env: dict[str, EnvRef] = Field(default_factory=dict)
+    path: str = Field(default='/mcp', pattern=r'^/')
+    startup_timeout_seconds: int = Field(default=30, ge=1, le=300)
+
+
+Transport = StdioTransport | HttpTransport | ContainerTransport
 
 
 class Target(StrictModel):
@@ -205,13 +217,19 @@ def load_campaign(path: Path, overrides=None):
     _unique(scenarios, 'scenario')
     for target in campaign.targets:
         transport = target.transport
-        for ref in transport.env.values() if isinstance(transport, StdioTransport) else transport.headers.values():
+        refs = (transport.env.values() if isinstance(transport, (StdioTransport, ContainerTransport))
+                else transport.headers.values())
+        for ref in refs:
             if ref.env not in os.environ:
                 raise ValueError(f'Missing environment variable {ref.env}')
         for scenario in scenarios:
             supplied = target.bindings.get(scenario.id)
             if supplied is None:
                 raise ValueError(f'target {target.id} has no bindings for scenario {scenario.id}')
+            if isinstance(transport, ContainerTransport) and not any(
+                    isinstance(check.action, HttpAction) for check in scenario.verify.checks):
+                raise ValueError(f'target {target.id} scenario {scenario.id} requires an '
+                                 'external HTTP verifier')
             missing = set(scenario.bindings) - supplied.keys()
             if missing:
                 raise ValueError(f'target {target.id} scenario {scenario.id} missing bindings {sorted(missing)}')

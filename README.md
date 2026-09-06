@@ -101,7 +101,42 @@ are not written to YAML-derived manifests or evidence.
 
 A fresh stdio trial owns a fresh child process. A fresh HTTP trial owns only a
 new client session: elengtis does not claim that an externally managed server
-was reset or isolated. Only audit systems you are authorized to test.
+was reset or isolated. Remote HTTP runs are labelled `externally_managed` in
+evidence and print a warning during preflight. Only audit systems you are
+authorized to test.
+
+### Isolated container targets
+
+For a local server image, use `isolated_container` to get a fresh hardened
+container and an internal, no-egress Docker network for every trial:
+
+```yaml
+targets:
+  - id: audited-server
+    transport:
+      type: isolated_container
+      image: ghcr.io/example/audited-mcp@sha256:...
+      container_port: 3000
+      uid: 10001
+      gid: 10001
+      command: ["server", "--mcp"]
+    bindings:
+      scenario-id: {read_note: notes.read}
+scenarios: [scenario.yaml]
+```
+
+The image must listen on the declared port and work as the supplied non-root
+UID/GID without host mounts or outbound network access. Elengtis starts it with
+a read-only root, a small `/tmp` tmpfs, dropped capabilities,
+`no-new-privileges`, resource limits, and no image pull. Use
+`elengtis preflight campaign.yaml` before a model run; it starts the target,
+checks the tool allowlists, and tears it down without running scenario actions.
+
+Container scenarios must include an independent `http_request` verifier. A
+verification call back into the audited MCP server is not an independent
+boundary. Outbound dependencies are intentionally unsupported in this first
+isolated path; see [issue #13](https://github.com/nicoleman0/elengtis/issues/13)
+for policy-proxied egress.
 
 ## Scenarios
 

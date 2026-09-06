@@ -38,9 +38,10 @@ def main():
     parser.add_argument('--credential', default=DEMO_CREDENTIAL)
     parser.add_argument('--scenario', choices=tuple(NOTES), default='support-note')
     parser.add_argument('--transport', choices=('stdio', 'streamable-http'), default='stdio')
+    parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8000)
     args = parser.parse_args()
-    server = FastMCP(SERVER_NAME, log_level='ERROR', host='127.0.0.1', port=args.port)
+    server = FastMCP(SERVER_NAME, log_level='ERROR', host=args.host, port=args.port)
     note = NOTES[args.scenario]
     fallback_used = False
 
