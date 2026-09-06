@@ -125,6 +125,25 @@ class ConfigTests(unittest.TestCase):
             with patch.dict(os.environ, {'TEST_MCP_TOKEN': 'secret'}):
                 self.assertEqual(load_campaign(campaign).campaign.generation['route'], 'fallback')
 
+    def test_model_free_campaign_rejects_model_settings_and_non_reference_engine(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            campaign = self.files(root)
+            with patch.dict(os.environ, {'TEST_MCP_TOKEN': 'secret'}):
+                campaign.write_text(CAMPAIGN.replace(
+                    'engine: reference', 'engine: graph\nmodel_free: true'))
+                with self.assertRaisesRegex(ValueError, 'model_free campaigns require engine reference'):
+                    load_campaign(campaign)
+
+                campaign.write_text(CAMPAIGN.replace(
+                    'engine: reference', 'engine: reference\nmodel_free: true\nmodel: openai/test'))
+                with self.assertRaisesRegex(ValueError, 'cannot configure model settings'):
+                    load_campaign(campaign)
+
+                campaign.write_text(CAMPAIGN.replace(
+                    'engine: reference', 'engine: reference\nmodel_free: true'))
+                self.assertTrue(load_campaign(campaign).campaign.model_free)
+
 
 if __name__ == '__main__':
     unittest.main()

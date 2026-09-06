@@ -1,14 +1,27 @@
 import asyncio
 from contextlib import asynccontextmanager
+import gc
 import json
 from pathlib import Path
+import socket
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
+import httpx
+
 from elengtis.config import ContainerTransport, load_campaign
 from elengtis.cli import build_parser
-from elengtis.transports import docker_run_args, unmanaged_target_metadata
+from elengtis.transports import (_close_target, _localhost_relay, _wait_http_ready,
+                                 docker_relay_args, docker_run_args,
+                                 unmanaged_target_metadata)
+
+
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        return sock.getsockname()[1]
 
 
 SCENARIO = '''
@@ -37,6 +50,74 @@ verify:
 
 
 class IsolationTests(unittest.TestCase):
+    def test_docker_cleanup_runs_when_mcp_context_close_fails(self):
+        class Stack:
+            async def aclose(self):
+                raise RuntimeError('session close failed')
+
+        class Lifecycle:
+            cleaned = False
+
+            def cleanup(self):
+                self.cleaned = True
+
+        lifecycle = Lifecycle()
+        with self.assertRaisesRegex(RuntimeError, 'session close failed'):
+            asyncio.run(_close_target(Stack(), lifecycle, None))
+        self.assertTrue(lifecycle.cleaned)
+
+    def test_relay_reaches_a_target_that_starts_after_the_client_connects(self):
+        async def scenario():
+            async def serve(reader, writer):
+                await reader.read(4096)
+                writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n')
+                await writer.drain()
+                writer.close()
+
+            port = free_port()
+            relay = await _localhost_relay('127.0.0.1', port)
+            host_port = relay.sockets[0].getsockname()[1]
+
+            async def start_late():
+                await asyncio.sleep(.3)
+                return await asyncio.start_server(serve, '127.0.0.1', port)
+
+            late = asyncio.create_task(start_late())
+            try:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    await _wait_http_ready(client, f'http://127.0.0.1:{host_port}/mcp', 5)
+            finally:
+                server = await late
+                server.close()
+                await server.wait_closed()
+                relay.close()
+                await relay.wait_closed()
+
+        asyncio.run(scenario())
+
+    def test_relay_fails_bounded_and_quietly_when_the_target_never_starts(self):
+        async def scenario():
+            unhandled = []
+            asyncio.get_running_loop().set_exception_handler(
+                lambda loop, context: unhandled.append(context))
+            relay = await _localhost_relay('127.0.0.1', free_port())
+            host_port = relay.sockets[0].getsockname()[1]
+            started = time.monotonic()
+            try:
+                async with httpx.AsyncClient(timeout=2) as client:
+                    with self.assertRaisesRegex(RuntimeError, 'did not become ready'):
+                        await _wait_http_ready(client, f'http://127.0.0.1:{host_port}/mcp', .5)
+            finally:
+                relay.close()
+                await relay.wait_closed()
+            gc.collect()
+            await asyncio.sleep(0)
+            return time.monotonic() - started, unhandled
+
+        elapsed, unhandled = asyncio.run(scenario())
+        self.assertLess(elapsed, 5)
+        self.assertEqual(unhandled, [])  # a refused hop must not log an unhandled callback error
+
     def test_docker_run_args_apply_hardening_without_pull_or_host_access(self):
         transport = ContainerTransport(type='isolated_container', image='target:latest',
                                        container_port=3000, uid=10001, gid=10001,
@@ -56,6 +137,18 @@ class IsolationTests(unittest.TestCase):
         self.assertNotIn('--privileged', args)
         self.assertNotIn('--volume', args)
         self.assertNotIn('--device', args)
+
+    def test_runner_relay_is_localhost_only_and_separate_from_target_network(self):
+        args = docker_relay_args('alpine/socat@sha256:relay', 'relay', 3000)
+        self.assertEqual(args[0], 'create')
+        self.assertIn('--pull=never', args)
+        self.assertIn('--publish', args)
+        self.assertIn('127.0.0.1::3001', args)
+        self.assertIn('--cap-drop=ALL', args)
+        self.assertIn('--user=65534:65534', args)
+        self.assertIn('--entrypoint=socat', args)
+        self.assertNotIn('--network', args)
+        self.assertEqual(args[-2:], ['TCP-LISTEN:3001,fork,reuseaddr', 'TCP:target:3000'])
 
     def test_isolated_target_requires_external_http_verifier(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -84,6 +177,15 @@ scenarios: [scenario.yaml]
         self.assertEqual(metadata['isolation'], 'externally_managed')
         self.assertEqual(metadata['session'], 'fresh_client')
         self.assertFalse(metadata['reset_asserted'])
+
+    def test_isolated_metadata_identifies_each_fresh_container(self):
+        from elengtis.transports import ContainerLifecycle
+
+        lifecycle = ContainerLifecycle('name', 'network', 'image-id', 'container-id')
+        metadata = lifecycle.metadata()
+        self.assertEqual(metadata['container_id'], 'container-id')
+        self.assertEqual(metadata['session'], 'fresh_container')
+        self.assertTrue(metadata['reset_asserted'])
 
     def test_preflight_is_a_model_free_command(self):
         args = build_parser().parse_args(['preflight', 'campaign.yaml'])

@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import uuid
@@ -24,14 +25,20 @@ class ContainerLifecycle:
     name: str
     network: str
     image_id: str
+    container_id: str
+    relay_name: str | None = None
+    relay_image_id: str | None = None
     endpoint: str | None = None
     cleanup_ok: bool | None = None
     cleanup_errors: list[str] | None = None
 
     def metadata(self):
-        return {
+        metadata = {
             'isolation': 'isolated_container',
             'image_id': self.image_id,
+            'container_id': self.container_id,
+            'session': 'fresh_container',
+            'reset_asserted': True,
             'network': {'internal': True, 'name': self.network},
             'endpoint': self.endpoint,
             'hardening': {
@@ -46,10 +53,16 @@ class ContainerLifecycle:
             },
             'cleanup': {'ok': self.cleanup_ok, 'errors': self.cleanup_errors or []},
         }
+        if self.relay_image_id:
+            metadata['relay'] = {'trusted': True, 'image_id': self.relay_image_id,
+                                 'localhost_only': True}
+        return metadata
 
     def cleanup(self):
         errors = []
-        for args in (['rm', '--force', self.name], ['network', 'rm', self.network]):
+        containers = [self.name] + ([self.relay_name] if self.relay_name else [])
+        for args in ([['rm', '--force', name] for name in containers] +
+                     [['network', 'rm', self.network]]):
             try:
                 _docker(args, check=True)
             except Exception as exc:  # cleanup evidence must survive teardown failures
@@ -71,6 +84,22 @@ def docker_run_args(transport: ContainerTransport, name, network, env_file):
         '--security-opt=no-new-privileges:true', '--pids-limit=128', '--memory=512m',
         '--cpus=1', f'--user={transport.uid}:{transport.gid}', '--env-file', env_file,
         transport.image, *transport.command,
+    ]
+
+
+RELAY_PORT = 3001
+
+
+def docker_relay_args(image, name, target_port):
+    """Run a trusted localhost ingress relay; the audited target stays internal-only."""
+    return [
+        'create', '--pull=never', '--name', name,
+        '--label', 'elengtis.managed=true',
+        '--publish', f'127.0.0.1::{RELAY_PORT}', '--read-only',
+        '--tmpfs=/tmp:rw,noexec,nosuid,size=16m', '--cap-drop=ALL',
+        '--security-opt=no-new-privileges:true', '--pids-limit=64', '--memory=64m',
+        '--cpus=.25', '--user=65534:65534', '--entrypoint=socat', image,
+        f'TCP-LISTEN:{RELAY_PORT},fork,reuseaddr', f'TCP:target:{target_port}',
     ]
 
 
@@ -110,6 +139,14 @@ def _write_env_file(transport):
         raise
 
 
+def _published_port(name):
+    output = _docker(['port', name, f'{RELAY_PORT}/tcp'], check=True).stdout.strip()
+    match = re.fullmatch(r'127\.0\.0\.1:(\d+)', output)
+    if not match:
+        raise RuntimeError(f'docker did not publish a localhost relay port: {output!r}')
+    return int(match.group(1))
+
+
 def _open_container(transport):
     image = _docker(['image', 'inspect', '--format={{.Id}}', transport.image], check=True)
     image_id = image.stdout.strip()
@@ -125,11 +162,28 @@ def _open_container(transport):
         result = _docker(docker_run_args(transport, name, network, env_file), check=True)
         if not result.stdout.strip():
             raise RuntimeError('docker run returned no container ID')
-        return ContainerLifecycle(name, network, image_id), _docker_container_ip(name, network)
+        lifecycle = ContainerLifecycle(name, network, image_id, result.stdout.strip())
+        if transport.relay_image:
+            relay_image = _docker(['image', 'inspect', '--format={{.Id}}',
+                                   transport.relay_image], check=True).stdout.strip()
+            relay_name = f'elengtis-relay-{uuid.uuid4().hex}'
+            lifecycle.relay_name = relay_name
+            lifecycle.relay_image_id = relay_image
+            relay = _docker(docker_relay_args(
+                transport.relay_image, relay_name, transport.container_port), check=True)
+            if not relay.stdout.strip():
+                raise RuntimeError('docker relay create returned no container ID')
+            _docker(['network', 'connect', network, relay_name], check=True)
+            _docker(['start', relay_name], check=True)
+            return lifecycle, '127.0.0.1', _published_port(relay_name)
+        return lifecycle, _docker_container_ip(name, network), transport.container_port
     except Exception:
         try:
-            _docker(['rm', '--force', name])
-            _docker(['network', 'rm', network])
+            if 'lifecycle' in locals():
+                lifecycle.cleanup()
+            else:
+                _docker(['rm', '--force', name])
+                _docker(['network', 'rm', network])
         finally:
             if env_file:
                 Path(env_file).unlink(missing_ok=True)
@@ -169,21 +223,16 @@ class _LocalhostRelay:
             await asyncio.gather(*tuple(self.handlers), return_exceptions=True)
 
 
-async def _localhost_relay(address, port, timeout):
+async def _localhost_relay(address, port):
     handlers = set()
 
     async def relay(reader, writer):
         handlers.add(asyncio.current_task())
         try:
-            deadline = asyncio.get_running_loop().time() + timeout
-            while True:
-                try:
-                    remote_reader, remote_writer = await asyncio.open_connection(address, port)
-                    break
-                except OSError:
-                    if asyncio.get_running_loop().time() >= deadline:
-                        raise
-                    await asyncio.sleep(.1)
+            try:
+                remote_reader, remote_writer = await asyncio.open_connection(address, port)
+            except OSError:
+                return  # target not listening yet; _wait_http_ready owns the retry deadline
             tasks = [asyncio.create_task(_pipe(reader, remote_writer)),
                      asyncio.create_task(_pipe(remote_reader, writer))]
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -196,6 +245,35 @@ async def _localhost_relay(address, port, timeout):
             await writer.wait_closed()
 
     return _LocalhostRelay(await asyncio.start_server(relay, '127.0.0.1', 0), handlers)
+
+
+async def _wait_http_ready(client, url, timeout):
+    """Wait for an HTTP response, not merely an accepted TCP connection."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    last_error = None
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            await client.options(url)
+            return
+        except httpx.HTTPError as exc:
+            last_error = exc
+            await asyncio.sleep(.1)
+    raise RuntimeError('target HTTP endpoint did not become ready: '
+                       f'{type(last_error).__name__}: {last_error}')
+
+
+async def _close_target(stack, lifecycle, relay):
+    """Always tear down Docker resources, even when an MCP context fails to close."""
+    try:
+        if relay:
+            relay.close()
+            await relay.wait_closed()
+    finally:
+        try:
+            await stack.aclose()
+        finally:
+            if lifecycle:
+                lifecycle.cleanup()
 
 
 @asynccontextmanager
@@ -216,17 +294,20 @@ async def open_target(target, values, request_timeout=10):
                     args=[str(resolve_value(arg, values)) for arg in transport.args], env=env)
                 read, write = await stack.enter_async_context(stdio_client(params))
             elif isinstance(transport, ContainerTransport):
-                lifecycle, container_ip = _open_container(transport)
-                relay = await _localhost_relay(container_ip, transport.container_port,
-                                               transport.startup_timeout_seconds)
-                host_port = relay.sockets[0].getsockname()[1]
+                lifecycle, address, port = _open_container(transport)
+                if transport.relay_image:
+                    host_port = port
+                else:
+                    relay = await _localhost_relay(address, port)
+                    host_port = relay.sockets[0].getsockname()[1]
                 lifecycle.endpoint = f'127.0.0.1:{host_port}'
                 metadata = lifecycle.metadata()
                 http = await stack.enter_async_context(
                     httpx.AsyncClient(timeout=transport.startup_timeout_seconds))
+                url = f'http://127.0.0.1:{host_port}{transport.path}'
+                await _wait_http_ready(http, url, transport.startup_timeout_seconds)
                 read, write, _ = await stack.enter_async_context(
-                    streamable_http_client(f'http://127.0.0.1:{host_port}{transport.path}',
-                                           http_client=http, terminate_on_close=False))
+                    streamable_http_client(url, http_client=http, terminate_on_close=False))
             else:
                 headers = {name: os.environ[ref.env] for name, ref in transport.headers.items()}
                 http = await stack.enter_async_context(httpx.AsyncClient(headers=headers))
@@ -240,13 +321,10 @@ async def open_target(target, values, request_timeout=10):
             client._elengtis_target_metadata = metadata
             yield client
         finally:
-            if relay:
-                relay.close()
-                await relay.wait_closed()
-            await stack.aclose()
-            if lifecycle:
-                lifecycle.cleanup()
-                if client:
+            try:
+                await _close_target(stack, lifecycle, relay)
+            finally:
+                if lifecycle and client:
                     client._elengtis_target_metadata = lifecycle.metadata()
 
 

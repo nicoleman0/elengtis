@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,102 @@ EXAMPLE = ROOT / 'src/elengtis/examples/offline.yaml'
 
 
 class CampaignCliTests(unittest.TestCase):
+    def test_model_free_campaign_runs_actions_without_constructing_an_agent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scenario = root / 'scenario.yaml'
+            scenario.write_text('''schema_version: 1
+id: actions-only
+title: Actions only
+description: Exercise trusted actions without a model.
+bindings: [read_note]
+setup:
+  - {type: mcp_tool, id: direct-read, tool: {binding: read_note}}
+exercise:
+  system: No model is used.
+  user: No model is used.
+  tools: [{binding: read_note}]
+proposal_rules: []
+verify: {mode: all, checks: []}
+cleanup: []
+''')
+            campaign = root / 'campaign.yaml'
+            campaign.write_text(f'''schema_version: 1
+model_free: true
+targets:
+  - id: local
+    transport:
+      type: stdio
+      command: {sys.executable}
+      args: [-m, elengtis.server, --collector, {{runner: collector}}, --scenario, benign-refusal]
+    bindings:
+      actions-only: {{read_note: read_note}}
+scenarios: [scenario.yaml]
+''')
+            out = root / 'results'
+            from elengtis.cli import run_matrix
+            with patch('elengtis.cli.resolve_engine', side_effect=AssertionError('agent constructed')):
+                asyncio.run(run_matrix(load_campaign(campaign), out))
+
+            row = json.loads((out / 'runs.jsonl').read_text())
+            self.assertEqual(row['termination'], 'model_free')
+            self.assertEqual(row['model_turns'], 0)
+            self.assertEqual(row['tool_calls'], 0)
+            self.assertEqual(row['evidence_status'], 'complete')
+            self.assertIsNone(row['completed'])  # no checks declared, so no outcome verified
+            self.assertIsNone(row['failure_class'])
+            evidence = json.loads((out / row['evidence']).read_text())
+            self.assertEqual(evidence['setup'][0]['id'], 'direct-read')
+            self.assertEqual(evidence['trajectory'], [])
+
+    def test_no_checks_still_reports_incomplete_when_a_phase_fails(self):
+        with socket.socket() as sock:  # nothing listens here, so the action fails to connect
+            sock.bind(('127.0.0.1', 0))
+            dead = sock.getsockname()[1]
+        broken = (f"  - {{type: http_request, id: broken, method: GET, "
+                  f"url: 'http://127.0.0.1:{dead}/state'}}")
+        good = '  - {type: mcp_tool, id: direct-read, tool: {binding: read_note}}'
+        for phase in ('setup', 'cleanup'):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / 'scenario.yaml').write_text(f"""schema_version: 1
+id: actions-only
+title: Actions only
+description: A phase failure must not be hidden by an empty verify block.
+bindings: [read_note]
+setup:
+{broken if phase == 'setup' else good}
+exercise:
+  system: No model is used.
+  user: No model is used.
+  tools: [{{binding: read_note}}]
+proposal_rules: []
+verify: {{mode: all, checks: []}}
+cleanup:
+{broken if phase == 'cleanup' else '  []'}
+""")
+                (root / 'campaign.yaml').write_text(f"""schema_version: 1
+model_free: true
+targets:
+  - id: local
+    transport:
+      type: stdio
+      command: {sys.executable}
+      args: [-m, elengtis.server, --collector, {{runner: collector}}, --scenario, benign-refusal]
+    bindings:
+      actions-only: {{read_note: read_note}}
+scenarios: [scenario.yaml]
+""")
+                out = root / 'results'
+                from elengtis.cli import run_matrix
+                with self.assertRaisesRegex(RuntimeError, 'incomplete attempts'):
+                    asyncio.run(run_matrix(load_campaign(root / 'campaign.yaml'), out))
+
+                row = json.loads((out / 'runs.jsonl').read_text())
+                self.assertEqual(row['evidence_status'], 'incomplete')
+                self.assertIsNone(row['completed'])
+                self.assertTrue(any(error.get('phase') == phase for error in row['errors']))
+
     def test_run_records_optional_safety_and_safe_completion(self):
         async def fake_engine(_provider, _model, client, _step_budget, **_kwargs):
             await client.call_tool('read_note', {})

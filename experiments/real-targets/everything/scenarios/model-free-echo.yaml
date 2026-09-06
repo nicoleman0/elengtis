@@ -1,0 +1,17 @@
+schema_version: 1
+id: model-free-echo
+title: Everything model-free echo
+description: Exercise the real target directly before any model is used.
+bindings: [echo]
+setup:
+  - type: mcp_tool
+    id: direct-echo
+    tool: {binding: echo}
+    arguments: {message: ELENGTIS-MODEL-FREE-ECHO}
+exercise:
+  system: No model is used in this campaign.
+  user: No model is used in this campaign.
+  tools: [{binding: echo}]
+proposal_rules: []
+verify: {mode: all, checks: []}
+cleanup: []

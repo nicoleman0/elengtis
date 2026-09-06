@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from elengtis.analysis import pairwise, recommend_engine, summarize
 
@@ -23,6 +24,29 @@ def write_run(root, rows, block=0):
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_everything_generator_creates_the_bounded_real_target_smoke(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(
+                [sys.executable,
+                 str(ROOT / 'experiments/real-targets/everything/generate_smoke.py'),
+                 '--out', str(root)], check=True, capture_output=True, text=True, timeout=20)
+            plan = json.loads((root / 'run-order.json').read_text())
+            self.assertEqual((len(plan['runs']), plan['max_model_calls']), (4, 12))
+            self.assertEqual(plan['engines'], ['create_agent'])
+            self.assertEqual({run['model_id'] for run in plan['runs']},
+                             {'gpt-oss-20b', 'deepseek-v4-flash-0731'})
+            self.assertEqual({run['scenario'] for run in plan['runs']},
+                             {'everything-echo', 'everything-structured-content'})
+            with patch.dict('os.environ', {'OPENROUTER_API_KEY': 'test-key'}):
+                checked, bundles, _ = PILOT.preflight(root / 'run-order.json', 12)
+            self.assertEqual(len(bundles), 4)
+            self.assertEqual(checked['budget_usd'], .02)
+            for bundle in bundles:
+                transport = bundle.campaign.targets[0].transport
+                self.assertEqual(transport.image, 'elengtis/everything:2026.8.31')
+                self.assertEqual(transport.path, '/mcp')
+
     def test_smoke_reports_invalid_tool_call_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:
             root, cell = Path(tmp), Path(tmp) / 'cell'

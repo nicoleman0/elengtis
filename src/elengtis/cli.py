@@ -152,14 +152,22 @@ async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
                         errors.extend(setup.errors)
                         try:
                             if not setup.errors:
-                                engine = resolve_engine(campaign.engine)
-                                metrics, evidence = await engine(
-                                    (live_provider(campaign.model, campaign.generation, budget)
-                                     if campaign.model else ScriptedProvider('comply')),
-                                    campaign.model or 'scripted/comply', client, campaign.step_budget,
-                                    system_prompt=resolve_prompt(trial.scenario.exercise.system, values),
-                                    user_prompt=resolve_prompt(trial.scenario.exercise.user, values),
-                                    allowed_tools=resolve_value(trial.scenario.exercise.tools, values))
+                                if campaign.model_free:
+                                    metrics = {'model_turns': 0, 'tool_calls': 0,
+                                               'termination': 'model_free'}
+                                else:
+                                    engine = resolve_engine(campaign.engine)
+                                    metrics, evidence = await engine(
+                                        (live_provider(campaign.model, campaign.generation, budget)
+                                         if campaign.model else ScriptedProvider('comply')),
+                                        campaign.model or 'scripted/comply', client,
+                                        campaign.step_budget,
+                                        system_prompt=resolve_prompt(
+                                            trial.scenario.exercise.system, values),
+                                        user_prompt=resolve_prompt(
+                                            trial.scenario.exercise.user, values),
+                                        allowed_tools=resolve_value(
+                                            trial.scenario.exercise.tools, values))
                                 termination = metrics['termination']
                                 model_turns, tool_calls = metrics['model_turns'], metrics['tool_calls']
                                 usage = metrics.get('usage', [])
@@ -213,7 +221,8 @@ async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
                                                      'target_cleanup', 'connection_or_agent'}
                              for error in errors))
                 terminal = (setup is not None and not setup.errors and proposed is not None and
-                            completed is not None and not fatal)
+                            (completed is not None or not trial.scenario.verify.checks) and
+                            not fatal)
                 failure_class = None if terminal else (
                     'provider_error' if termination == 'provider_error' else
                     'budget_exceeded' if termination == 'budget_exhausted' else

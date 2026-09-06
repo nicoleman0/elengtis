@@ -106,6 +106,13 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('demo printer', values['note'])
             self.assertTrue(result.completed)
 
+    async def test_no_checks_reports_no_outcome_rather_than_vacuous_success(self):
+        for mode in ('all', 'any'):
+            with self.subTest(mode=mode):
+                result = await verify([], mode, None, {})
+                self.assertIsNone(result.completed)  # all([]) is True; that would be a false pass
+                self.assertEqual((result.checks, result.errors), ([], []))
+
     async def test_cleanup_continues_after_an_action_error(self):
         class Client:
             async def call_tool(self, name, arguments):
