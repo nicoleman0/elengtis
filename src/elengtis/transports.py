@@ -76,9 +76,10 @@ def _docker(args, *, check=False):
 
 
 def docker_run_args(transport: ContainerTransport, name, network, env_file):
+    labels = _job_labels()
     return [
         'run', '--detach', '--pull=never', '--name', name,
-        '--label', 'elengtis.managed=true', '--label', f'elengtis.network={network}',
+        '--label', 'elengtis.managed=true', '--label', f'elengtis.network={network}', *labels,
         '--network', network, '--network-alias', 'target',
         '--read-only', '--tmpfs=/tmp:rw,noexec,nosuid,size=64m', '--cap-drop=ALL',
         '--security-opt=no-new-privileges:true', '--pids-limit=128', '--memory=512m',
@@ -94,7 +95,7 @@ def docker_relay_args(image, name, target_port):
     """Run a trusted localhost ingress relay; the audited target stays internal-only."""
     return [
         'create', '--pull=never', '--name', name,
-        '--label', 'elengtis.managed=true',
+        '--label', 'elengtis.managed=true', *_job_labels(),
         '--publish', f'127.0.0.1::{RELAY_PORT}', '--read-only',
         '--tmpfs=/tmp:rw,noexec,nosuid,size=16m', '--cap-drop=ALL',
         '--security-opt=no-new-privileges:true', '--pids-limit=64', '--memory=64m',
@@ -110,6 +111,14 @@ def unmanaged_target_metadata():
         'reset_asserted': False,
         'egress_controlled': False,
     }
+
+
+def _job_labels():
+    labels = []
+    for key in ('JOB_ID', 'RUN_ID', 'ATTEMPT_ID'):
+        if value := os.environ.get(f'ELENGTIS_{key}'):
+            labels.extend(['--label', f'elengtis.{key.lower()}={value}'])
+    return labels
 
 
 def target_metadata(client):
@@ -155,7 +164,7 @@ def _open_container(transport):
     network = f'elengtis-{uuid.uuid4().hex}'
     name = f'elengtis-{uuid.uuid4().hex}'
     _docker(['network', 'create', '--driver', 'bridge', '--internal',
-             '--label', 'elengtis.managed=true', network], check=True)
+             '--label', 'elengtis.managed=true', *_job_labels(), network], check=True)
     env_file = None
     try:
         env_file = _write_env_file(transport)

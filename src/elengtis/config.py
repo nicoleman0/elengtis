@@ -221,7 +221,7 @@ def _unique(items, label):
         raise ValueError(f'{label} IDs must be unique')
 
 
-def load_campaign(path: Path, overrides=None):
+def load_campaign(path: Path, overrides=None, *, check_environment=True):
     path = Path(path)
     if path.suffix not in ('.yaml', '.yml'):
         raise ValueError('Campaign configuration must be a YAML file')
@@ -237,7 +237,7 @@ def load_campaign(path: Path, overrides=None):
         refs = (transport.env.values() if isinstance(transport, (StdioTransport, ContainerTransport))
                 else transport.headers.values())
         for ref in refs:
-            if ref.env not in os.environ:
+            if check_environment and ref.env not in os.environ:
                 raise ValueError(f'Missing environment variable {ref.env}')
         for scenario in scenarios:
             supplied = target.bindings.get(scenario.id)

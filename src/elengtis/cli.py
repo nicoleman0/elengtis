@@ -1,5 +1,5 @@
 """Validate and run declarative MCP auditing campaigns."""
-import argparse, asyncio, hashlib, json, platform, subprocess, sys, tempfile, traceback, uuid
+import argparse, asyncio, hashlib, json, os, platform, subprocess, sys, tempfile, traceback, uuid
 from collections import Counter
 from datetime import datetime, timezone
 from importlib import import_module
@@ -9,13 +9,14 @@ from pathlib import Path
 
 from elengtis.config import (Campaign, CampaignBundle, ContainerTransport, Scenario,
                              load_campaign, plan_trials, write_schemas)
-from elengtis.budget import BudgetExceeded
+from elengtis.budget import BudgetExceeded, PilotBudget
+from elengtis.observer import NO_OBSERVER
 from elengtis.reference import ScriptedProvider
 from elengtis.scenario import (evaluate_proposals, evaluate_safety, resolve_prompt,
                                resolve_value, run_actions, verify)
 from elengtis.transports import agent_tools, open_target, target_metadata, unmanaged_target_metadata
 
-SCHEMA_VERSION, METRICS_VERSION, MAX_CONSECUTIVE_TARGET_FAILURES = 6, 3, 3
+SCHEMA_VERSION, METRICS_VERSION, MAX_CONSECUTIVE_TARGET_FAILURES = 7, 3, 3
 ENGINES = {'reference': ('reference', 'run_episode'), 'graph': ('graph', 'run_episode'),
            'langchain': ('adapters', 'run_episode'), 'create_agent': ('adapters', 'run_agent_episode')}
 PACKAGES = ('mcp', 'pydantic', 'PyYAML', 'httpx', 'langchain', 'langchain-core', 'langgraph',
@@ -103,7 +104,7 @@ def write_summary(bundle, out, attempts):
     (out / 'summary.txt').write_text(summary + '\n'); print(summary)
 
 
-async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
+async def run_matrix(bundle, out, run_id=None, prior=(), budget=None, observer=NO_OBSERVER, manifest_metadata=None):
     campaign, resuming = bundle.campaign, run_id is not None
     run_id = run_id or str(uuid.uuid4())
     done = {r['trial_id'] for r in prior if r['evidence_status'] == 'complete'}
@@ -121,12 +122,17 @@ async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
                                    'order': campaign.order, 'model_id': campaign.model_id,
                                    'generation': campaign.generation},
                     'environment': provenance(),
-                    'max_consecutive_target_failures': MAX_CONSECUTIVE_TARGET_FAILURES}
+                    'max_consecutive_target_failures': MAX_CONSECUTIVE_TARGET_FAILURES,
+                    'workbench': manifest_metadata or {}}
         (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+        observer.event('run_started', {'run_id': run_id})
     with (out / 'runs.jsonl').open('a' if resuming else 'x') as stream:
         for trial in plan_trials(bundle):
+            if observer.cancelled():
+                raise KeyboardInterrupt
             if trial.trial_id in done:
                 continue
+            observer.event('trial_started', {'trial_id': trial.trial_id})
             suffix = f'.retry-{counts[trial.trial_id]}' if counts[trial.trial_id] else ''
             evidence_name = f'{trial.trial_id}{suffix}.json'
             attempt_id, canary = str(uuid.uuid4()), f'ELENGTIS-{uuid.uuid4()}'
@@ -263,6 +269,8 @@ async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
                        'failure_class': failure_class, 'evidence': evidence_name,
                        'evidence_status': 'complete' if terminal else 'incomplete'}
                 stream.write(json.dumps(row) + '\n'); stream.flush(); rows.append(row); counts[trial.trial_id] += 1
+                observer.event('trial_finished', {'trial_id': trial.trial_id, 'termination': termination,
+                                                  'evidence': evidence_name})
                 if budget_stopped:
                     raise BudgetExceeded('budget cap reached; partial results retained for resume')
                 if terminal:
@@ -276,6 +284,7 @@ async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
     if incomplete:
         raise RuntimeError('campaign has incomplete attempts; fix the target and resume')
     write_summary(bundle, out, rows)
+    observer.event('run_finished', {'run_id': run_id})
 
 
 def build_parser():
@@ -288,9 +297,19 @@ def build_parser():
     analyze.add_argument('--out', type=Path, required=True)
     analyze.add_argument('--practical-margin-pp', type=float, default=10)
     analyze.add_argument('--conformance-passed', action='store_true')
+    commands.add_parser('serve').add_argument('--host', default='127.0.0.1')
+    commands.choices['serve'].add_argument('--port', type=int, default=8000)
+    commands.add_parser('worker')
+    database = commands.add_parser('db'); database.add_subparsers(dest='db_command', required=True).add_parser('migrate')
+    admin = commands.add_parser('admin'); bootstrap = admin.add_subparsers(dest='admin_command', required=True).add_parser('bootstrap'); bootstrap.add_argument('--email', required=True)
+    dev = commands.add_parser('dev'); dev_commands = dev.add_subparsers(dest='dev_command', required=True)
+    dev_serve = dev_commands.add_parser('serve'); dev_serve.add_argument('--email', required=True); dev_serve.add_argument('--host', default='127.0.0.1'); dev_serve.add_argument('--port', type=int, default=8000)
+    execute = commands.add_parser('_execute-job'); execute.add_argument('--kind', choices=('preflight', 'run', 'resume'), required=True); execute.add_argument('--snapshot', type=Path, required=True); execute.add_argument('--out', type=Path, required=True)
     run = commands.add_parser('run'); run.add_argument('--config', type=Path); run.add_argument('--out', type=Path, required=True)
     run.add_argument('--resume', action='store_true'); run.add_argument('--trials', type=int)
     run.add_argument('--step-budget', type=int); run.add_argument('--engine', choices=tuple(ENGINES)); run.add_argument('--model')
+    run.add_argument('--budget-usd', type=float); run.add_argument('--input-per-million', type=float)
+    run.add_argument('--output-per-million', type=float)
     example = commands.add_parser('example'); example.add_argument('--out', type=Path, required=True)
     return parser
 
@@ -324,6 +343,46 @@ def main():
     args = parser.parse_args(argv)
     try:
         if args.command == 'schema': write_schemas(args.out); return
+        if args.command == 'serve':
+            import uvicorn
+            from elengtis.web import create_app
+            uvicorn.run(create_app(), host=args.host, port=args.port)
+            return
+        if args.command == 'db':
+            from elengtis.db import Database, migrate
+            from elengtis.settings import Settings
+            db = Database(Settings.from_environment().database_url); db.open(); migrate(db); return
+        if args.command == 'admin':
+            from elengtis.artifacts import ArtifactStore
+            from elengtis.db import Database
+            from elengtis.settings import Settings
+            from elengtis.workbench import Workbench
+            config = Settings.from_environment(); db = Database(config.database_url); db.open()
+            Workbench(db, ArtifactStore(config.s3_endpoint, config.s3_bucket, config.s3_access_key, config.s3_secret_key)).bootstrap_admin(args.email); return
+        if args.command == 'dev':
+            from elengtis.dev import serve
+            serve(args.email, args.host, args.port); return
+        if args.command == 'worker':
+            from elengtis.worker import main as worker_main
+            raise SystemExit(worker_main())
+        if args.command == '_execute-job':
+            snapshot = json.loads(args.snapshot.read_text())
+            args.out.mkdir(parents=True, exist_ok=True)
+            config_path = args.out / 'campaign.yaml'; config_path.write_text(snapshot['campaign_yaml'])
+            for name, content in snapshot['scenarios'].items(): (args.out / name).write_text(content)
+            bundle = load_campaign(config_path)
+            if args.kind == 'preflight': asyncio.run(preflight(bundle))
+            else:
+                profile = snapshot.get('model_profile')
+                budget = None
+                if profile and profile['pricing_kind'] == 'metered':
+                    budget = PilotBudget(snapshot['runtime_cap_usd'], {bundle.campaign.model: {
+                        'input_per_million': float(profile['input_per_million']),
+                        'output_per_million': float(profile['output_per_million'])}})
+                asyncio.run(run_matrix(bundle, args.out / 'result', budget=budget,
+                                       manifest_metadata={'runtime_cap_usd': snapshot.get('runtime_cap_usd'),
+                                                          'model_profile': profile, 'campaign_revision': snapshot.get('campaign_revision')}))
+            return
         if args.command == 'analyze':
             from elengtis.analysis import write_report
             write_report(args.input, args.out, args.practical_margin_pp, args.conformance_passed); return
@@ -342,7 +401,18 @@ def main():
             if not args.config: raise ValueError('--config is required for a new run')
             overrides = {k: getattr(args, k) for k in ('trials', 'step_budget', 'engine', 'model')}
             bundle, run_id, prior = load_campaign(args.config, overrides), None, ()
-        asyncio.run(run_matrix(bundle, args.out, run_id, prior))
+        budget = None
+        if args.budget_usd is not None:
+            if args.budget_usd <= 0 or not bundle.campaign.model:
+                raise ValueError('--budget-usd requires a positive value and a live campaign model')
+            if args.input_per_million is None or args.output_per_million is None:
+                raise ValueError('--budget-usd requires explicit --input-per-million and --output-per-million rates')
+            input_rate, output_rate = args.input_per_million, args.output_per_million
+            if input_rate <= 0 or output_rate <= 0: raise ValueError('pricing rates must be positive')
+            committed = sum((row.get('usage') or {}).get('budget_charge_usd') or 0 for row in prior)
+            budget = PilotBudget(args.budget_usd, {bundle.campaign.model: {
+                'input_per_million': input_rate, 'output_per_million': output_rate}}, committed=committed)
+        asyncio.run(run_matrix(bundle, args.out, run_id, prior, budget))
     except KeyboardInterrupt:
         parser.exit(130, 'Interrupted; partial output retained. Continue with run --resume.\n')
     except Exception as exc:
