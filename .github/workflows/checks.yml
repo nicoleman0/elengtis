@@ -25,6 +25,7 @@ jobs:
 
       - name: Deterministic checks — no secrets, no live model calls
         run: |
+          test -z "$(git ls-files | grep -E '(^|/)(node_modules|\.cache|dist|__pycache__)/|\.(sqlite|sqlite3)$')"
           uv run python -m unittest discover -s tests -v
           uv run elengtis validate src/elengtis/examples/offline.yaml
 
