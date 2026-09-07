@@ -51,3 +51,8 @@ jobs:
         run: uv build
       - name: Exercise the isolated MCP target contract
         run: timeout --signal=TERM --kill-after=30s 5m uv run python tests/docker_target_smoke.py
+
+      - name: Exercise the DBHub injection verifier
+        run: |
+          docker build --pull=false -t elengtis/dbhub:1.2.3 experiments/real-targets/dbhub
+          timeout --signal=TERM --kill-after=30s 5m uv run python tests/docker_dbhub_smoke.py

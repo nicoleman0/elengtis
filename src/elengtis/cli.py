@@ -15,7 +15,7 @@ from elengtis.scenario import (evaluate_proposals, evaluate_safety, resolve_prom
                                resolve_value, run_actions, verify)
 from elengtis.transports import agent_tools, open_target, target_metadata, unmanaged_target_metadata
 
-SCHEMA_VERSION, METRICS_VERSION, MAX_CONSECUTIVE_TARGET_FAILURES = 5, 3, 3
+SCHEMA_VERSION, METRICS_VERSION, MAX_CONSECUTIVE_TARGET_FAILURES = 6, 3, 3
 ENGINES = {'reference': ('reference', 'run_episode'), 'graph': ('graph', 'run_episode'),
            'langchain': ('adapters', 'run_episode'), 'create_agent': ('adapters', 'run_agent_episode')}
 PACKAGES = ('mcp', 'pydantic', 'PyYAML', 'httpx', 'langchain', 'langchain-core', 'langgraph',
@@ -132,6 +132,9 @@ async def run_matrix(bundle, out, run_id=None, prior=(), budget=None):
             attempt_id, canary = str(uuid.uuid4()), f'ELENGTIS-{uuid.uuid4()}'
             with tempfile.TemporaryDirectory() as tmp:
                 values = dict(trial.bindings) | {'canary': canary, 'trial_dir': tmp,
+                                                  'evidence_dir': str(out),
+                                                  'trial_id': trial.trial_id,
+                                                  'attempt_id': attempt_id,
                                                   'collector': str(Path(tmp) / 'collector.jsonl')}
                 setup = cleanup = None
                 target_info = (unmanaged_target_metadata()

@@ -1,0 +1,7 @@
+{
+  "name": "elengtis-dbhub-target",
+  "private": true,
+  "dependencies": {
+    "@bytebase/dbhub": "1.2.3"
+  }
+}

@@ -1,11 +1,19 @@
 """Declarative scenario evaluation plus the legacy synthetic fixture contract."""
 from dataclasses import dataclass
+import asyncio
+import base64
+import hashlib
 import os
 import re
+import sqlite3
+import subprocess
+import time
+import uuid
+from pathlib import Path
 
 import httpx
 
-from elengtis.config import HttpAction
+from elengtis.config import ContainerSqliteAction, HttpAction
 
 @dataclass(frozen=True)
 class ProposalEvaluation:
@@ -142,6 +150,59 @@ async def _run_action(action, client, values, http_client):
                 await http_client.aclose()
         shown = {'method': action.method, 'url': action.url,
                  'headers': {name: {'env': ref.env} for name, ref in action.headers.items()}}
+    elif isinstance(action, ContainerSqliteAction):
+        if not hasattr(client, '_elengtis_container_name'):
+            raise ValueError('container_sqlite_query requires an isolated container target')
+        if ';' in action.query or not re.match(r'^\s*select\b',
+                                               action.query, re.IGNORECASE):
+            raise ValueError('container_sqlite_query accepts one read-only SELECT statement')
+        parameters = resolve_value(action.parameters, values)
+        if len(parameters) > 32:
+            raise ValueError('container_sqlite_query accepts at most 32 parameters')
+        artifact_dir = Path(values.get('evidence_dir', values['trial_dir']))
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_path = artifact_dir / f'{values.get("trial_id", action.id)}-{values.get("attempt_id", "attempt")}-{action.id}.snapshot.db'
+        container_snapshot = f'/tmp/elengtis-snapshot-{uuid.uuid4().hex}.db'
+        helper = (
+            "import {DatabaseSync,backup} from 'node:sqlite';"
+            "import {readFileSync,unlinkSync} from 'node:fs';"
+            "const [source,destination]=process.argv.slice(1);"
+            "const db=new DatabaseSync(source,{readOnly:true});"
+            "try { await backup(db,destination); "
+            "process.stdout.write(readFileSync(destination).toString('base64')); } "
+            "finally { db.close(); try { unlinkSync(destination); } catch {} }"
+        )
+        command = ['docker', 'exec', '--user',
+                   getattr(client, '_elengtis_container_user', '0:0'),
+                   client._elengtis_container_name, 'node', '--input-type=module', '-e',
+                   helper, action.path, container_snapshot]
+        result = await asyncio.to_thread(subprocess.run, command, capture_output=True,
+                                         text=True, timeout=15, check=True)
+        encoded = result.stdout.strip()
+        if len(encoded) > 8 * 1024 * 1024 * 4 / 3 + 64:
+            raise ValueError('SQLite snapshot exceeds 8 MiB')
+        snapshot = base64.b64decode(encoded, validate=True)
+        if len(snapshot) > 8 * 1024 * 1024:
+            raise ValueError('SQLite snapshot exceeds 8 MiB')
+        snapshot_path.write_bytes(snapshot)
+        digest = hashlib.sha256(snapshot).hexdigest()
+        with sqlite3.connect(f'file:{snapshot_path}?mode=ro', uri=True,
+                             timeout=5) as database:
+            database.enable_load_extension(False)
+            deadline = time.monotonic() + 5
+            database.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0,
+                                          10000)
+            cursor = database.execute(action.query, parameters)
+            columns = [item[0] for item in cursor.description or ()]
+            rows = [dict(zip(columns, row)) for row in cursor.fetchmany(101)]
+            if len(rows) > 100:
+                raise ValueError('SQLite query returned more than 100 rows')
+        raw = {'rows': rows, 'snapshot_sha256': digest,
+               'snapshot_bytes': len(snapshot), 'snapshot_path': str(snapshot_path),
+               'source_path': action.path,
+               'query': action.query, 'parameters': parameters}
+        shown = {'path': action.path, 'query': action.query,
+                 'parameters': parameters}
     else:
         tool = resolve_value(action.tool, values)
         arguments = resolve_value(action.arguments, values)

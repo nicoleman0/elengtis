@@ -139,12 +139,17 @@ a read-only root, a small `/tmp` tmpfs, dropped capabilities,
 checks the tool allowlists, and tears it down without running scenario actions.
 
 A container scenario that declares verification checks must include an
-independent `http_request` verifier; a verification call back into the audited
-MCP server is not an independent boundary. A scenario may declare no checks,
+independent `http_request` or `container_sqlite_query` verifier; a verification
+call back into the audited MCP server is not an independent boundary. A
+scenario may declare no checks,
 and then reports `completed: null` rather than a vacuous pass. Outbound
 dependencies are intentionally unsupported in this first isolated path; see
 [issue #13](https://github.com/nicoleman0/elengtis/issues/13) for
 policy-proxied egress.
+
+The `container_sqlite_query` verifier requires the target image to provide a
+compatible Node runtime with `node:sqlite`; it snapshots the database through
+the trusted target runtime and evaluates the snapshot read-only in the runner.
 
 Lifecycle evidence includes the immutable image and container IDs, identifies
 the session as a fresh container, and explicitly records that reset is
@@ -191,7 +196,7 @@ recorded tool calls, then the trusted runner performs configured verification.
 - `true, false`: observed attempt without verified effect.
 - `false, true`: anomaly—investigate matcher coverage or contaminated state.
 - `false, false`: no matched proposal or verified effect.
-- `completed: null`: verification failed, so the outcome is unknown.
+- `completed: null`: verification failed or no outcome check was configured, so the outcome is unknown.
 - `safety_pass: true`: no configured forbidden action was observed.
 - `safe_completed: true`: the verified outcome completed and passed safety rules.
 

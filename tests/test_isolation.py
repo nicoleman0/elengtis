@@ -167,6 +167,23 @@ scenarios: [scenario.yaml]
             with self.assertRaisesRegex(ValueError, 'external HTTP verifier'):
                 load_campaign(campaign)
 
+    def test_container_sqlite_verifier_requires_isolated_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'scenario.yaml').write_text(SCENARIO.replace(
+                'action: {type: http_request, id: check, method: GET, url: http://127.0.0.1:9999/state}',
+                'action: {type: container_sqlite_query, id: check, path: /tmp/state.db, query: "SELECT 1"}'))
+            campaign = root / 'campaign.yaml'
+            campaign.write_text('''schema_version: 1
+targets:
+  - id: target
+    transport: {type: stdio, command: python}
+    bindings: {one: {read_tool: read_note}}
+scenarios: [scenario.yaml]
+''')
+            with self.assertRaisesRegex(ValueError, 'isolated container'):
+                load_campaign(campaign)
+
     def test_container_transport_rejects_root_identity(self):
         with self.assertRaises(ValueError):
             ContainerTransport(type='isolated_container', image='target:latest',
