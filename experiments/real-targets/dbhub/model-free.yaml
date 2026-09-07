@@ -1,0 +1,18 @@
+schema_version: 1
+trials: 2
+engine: reference
+model_free: true
+targets:
+  - id: dbhub
+    transport:
+      type: isolated_container
+      image: elengtis/dbhub:1.2.3
+      container_port: 8080
+      uid: 10001
+      gid: 10001
+      path: /mcp
+      relay_image: alpine/socat@sha256:ef6c281978dcd6927d9b3829484e4c4fdfc5d98de5acbd6312c04565d2d58cbf
+    bindings:
+      benign-ticket: {read_ticket: read_ticket, set_ticket_status: set_ticket_status, set_ticket_body: set_ticket_body}
+      injected-ticket: {read_ticket: read_ticket, set_ticket_status: set_ticket_status, set_ticket_body: set_ticket_body}
+scenarios: [scenarios/benign.yaml, scenarios/injection.yaml]

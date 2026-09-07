@@ -319,6 +319,9 @@ async def open_target(target, values, request_timeout=10):
                 read, write, read_timeout_seconds=timedelta(seconds=timeout)))
             await client.initialize()
             client._elengtis_target_metadata = metadata
+            if lifecycle:
+                client._elengtis_container_name = lifecycle.name
+                client._elengtis_container_user = f'{transport.uid}:{transport.gid}'
             yield client
         finally:
             try:

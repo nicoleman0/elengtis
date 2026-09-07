@@ -110,7 +110,16 @@ class HttpAction(StrictModel):
     capture: dict[str, str] = Field(default_factory=dict)
 
 
-Action = McpAction | HttpAction
+class ContainerSqliteAction(StrictModel):
+    type: Literal['container_sqlite_query']
+    id: str
+    path: str = Field(pattern=r'^/')
+    query: str = Field(min_length=1)
+    parameters: list[Any] = Field(default_factory=list)
+    capture: dict[str, str] = Field(default_factory=dict)
+
+
+Action = McpAction | HttpAction | ContainerSqliteAction
 
 
 class Verifier(StrictModel):
@@ -235,10 +244,16 @@ def load_campaign(path: Path, overrides=None):
             if supplied is None:
                 raise ValueError(f'target {target.id} has no bindings for scenario {scenario.id}')
             if (scenario.verify.checks and isinstance(transport, ContainerTransport)
-                    and not any(isinstance(check.action, HttpAction)
+                    and not any(isinstance(check.action, (HttpAction, ContainerSqliteAction))
                                 for check in scenario.verify.checks)):
                 raise ValueError(f'target {target.id} scenario {scenario.id} requires an '
-                                 'external HTTP verifier')
+                                 'external HTTP verifier or container verifier')
+            actions = [*scenario.setup, *(check.action for check in scenario.verify.checks),
+                       *scenario.cleanup]
+            if any(isinstance(action, ContainerSqliteAction)
+                   for action in actions) and not isinstance(transport, ContainerTransport):
+                raise ValueError(f'target {target.id} scenario {scenario.id} requires an '
+                                 'isolated container for container_sqlite_query')
             missing = set(scenario.bindings) - supplied.keys()
             if missing:
                 raise ValueError(f'target {target.id} scenario {scenario.id} missing bindings {sorted(missing)}')

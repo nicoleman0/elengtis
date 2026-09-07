@@ -14,11 +14,14 @@ The image contract is deliberately narrow:
 - require no host mounts, Docker socket, devices, privileged mode, or outbound
   network access.
 
-A separately reachable verifier endpoint is required only for scenarios that
-assert target state. A scenario may declare no checks at all, in which case it
-reports `completed: null`. When an isolated target's scenario does declare
-checks, at least one must be an external `http_request`: a verification call
-back into the audited MCP server is not an independent boundary.
+A trusted independent verifier is required only for scenarios that assert
+target state. A scenario may declare no checks at all, in which case it reports
+`completed: null`. When an isolated target's scenario does declare checks, at
+least one must be an external `http_request` or
+`container_sqlite_query`: a verification call back into the audited MCP server
+is not an independent boundary. The SQLite verifier bypasses MCP responses but
+trusts the pinned target runtime, which must provide a compatible Node runtime
+with `node:sqlite` for snapshot capture.
 
 Docker's internal bridge networks do not support published host ports on all
 engines. Elengtis therefore keeps the audited container on the internal

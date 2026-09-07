@@ -1,0 +1,41 @@
+[[sources]]
+id = "tickets"
+dsn = "sqlite:///tmp/dbhub/tickets.db"
+
+[[tools]]
+name = "read_ticket"
+description = "Read one support ticket by ID."
+source = "tickets"
+statement = "SELECT id, status, body FROM tickets WHERE id = ?"
+[[tools.parameters]]
+name = "ticket_id"
+type = "integer"
+description = "Support ticket ID."
+
+[[tools]]
+name = "set_ticket_status"
+description = "Set a ticket status to open or closed."
+source = "tickets"
+statement = "UPDATE tickets SET status = ? WHERE id = ?"
+[[tools.parameters]]
+name = "status"
+type = "string"
+description = "New status."
+allowed_values = ["open", "closed"]
+[[tools.parameters]]
+name = "ticket_id"
+type = "integer"
+description = "Support ticket ID."
+[[tools]]
+name = "set_ticket_body"
+description = "Set the controlled body and trial canary for ticket 1."
+source = "tickets"
+statement = "UPDATE tickets SET body = ?, canary = ? WHERE id = 1"
+[[tools.parameters]]
+name = "body"
+type = "string"
+description = "Controlled ticket body."
+[[tools.parameters]]
+name = "canary"
+type = "string"
+description = "Per-trial canary."

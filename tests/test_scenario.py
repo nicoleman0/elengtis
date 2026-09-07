@@ -2,13 +2,14 @@ import unittest
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 
 import httpx
 from unittest.mock import patch
 
-from elengtis.config import (EnvRef, Examples, HttpAction, McpAction, Predicate,
+from elengtis.config import (ContainerSqliteAction, EnvRef, Examples, HttpAction, McpAction, Predicate,
                              ProposalRule, Scenario, StdioTransport, Target, ToolExample, Verifier)
 from elengtis.scenario import (evaluate_proposals, pointer, resolve_prompt, resolve_value,
                                evaluate_safety, run_actions, verify)
@@ -138,6 +139,54 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 result = await run_actions([action], None, {}, 'verification', client)
         self.assertEqual(seen['authorization'], 'SUPERSECRET')
         self.assertNotIn('SUPERSECRET', json.dumps(result.records))
+
+    async def test_container_sqlite_query_snapshots_and_rejects_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'source.db'
+            with sqlite3.connect(source) as database:
+                database.execute('CREATE TABLE tickets (status TEXT)')
+                database.execute("INSERT INTO tickets VALUES ('open')")
+            encoded = __import__('base64').b64encode(source.read_bytes()).decode()
+            action = ContainerSqliteAction(type='container_sqlite_query', id='state',
+                                            path='/tmp/tickets.db',
+                                            query='SELECT status FROM tickets')
+            client = type('Client', (), {'_elengtis_container_name': 'target',
+                                         '_elengtis_container_user': '10001:10001'})()
+            completed = type('Completed', (), {'stdout': encoded})()
+            with patch('elengtis.scenario.subprocess.run', return_value=completed):
+                result = await run_actions([action], client,
+                                           {'trial_dir': tmp, 'evidence_dir': tmp,
+                                            'trial_id': 'trial', 'attempt_id': 'attempt'}, 'verification')
+                self.assertFalse(result.errors)
+                self.assertEqual(result.records[0]['response']['rows'], [{'status': 'open'}])
+                self.assertTrue(Path(result.records[0]['response']['snapshot_path']).exists())
+                self.assertIn('attempt', result.records[0]['response']['snapshot_path'])
+            bad = ContainerSqliteAction(type='container_sqlite_query', id='bad',
+                                        path='/tmp/tickets.db', query='UPDATE tickets SET status="closed"')
+            result = await run_actions([bad], client, {'trial_dir': tmp}, 'verification')
+            self.assertEqual(result.errors[0]['phase'], 'verification')
+            multi = ContainerSqliteAction(type='container_sqlite_query', id='multi',
+                                          path='/tmp/tickets.db', query='SELECT 1; SELECT 2')
+            result = await run_actions([multi], client, {'trial_dir': tmp}, 'verification')
+            self.assertEqual(result.errors[0]['phase'], 'verification')
+
+    async def test_container_sqlite_query_rejects_bad_snapshots_and_limits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = type('Client', (), {'_elengtis_container_name': 'target',
+                                         '_elengtis_container_user': '10001:10001'})()
+            action = ContainerSqliteAction(type='container_sqlite_query', id='state',
+                                           path='/tmp/tickets.db', query='SELECT 1')
+
+            for stdout in ('not-base64', 'A' * (8 * 1024 * 4 // 3 + 100)):
+                completed = type('Completed', (), {'stdout': stdout})()
+                with patch('elengtis.scenario.subprocess.run', return_value=completed):
+                    result = await run_actions([action], client, {'trial_dir': tmp}, 'verification')
+                self.assertEqual(result.errors[0]['phase'], 'verification')
+
+            with patch('elengtis.scenario.subprocess.run',
+                       side_effect=__import__('subprocess').TimeoutExpired('docker', 15)):
+                result = await run_actions([action], client, {'trial_dir': tmp}, 'verification')
+            self.assertEqual(result.errors[0]['phase'], 'verification')
 
 
 if __name__ == '__main__':
