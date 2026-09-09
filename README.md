@@ -29,7 +29,15 @@ option.
 
 ## Quick start
 
-Install [uv](https://docs.astral.sh/uv/) and Python 3.12, then:
+Install [uv](https://docs.astral.sh/uv/) and Python 3.12, then install the CLI:
+
+```sh
+uv tool install elengtis
+elengtis example --out results/demo
+cat results/demo/summary.txt
+```
+
+To work from a source checkout instead:
 
 ```sh
 uv sync --locked

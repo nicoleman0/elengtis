@@ -16,6 +16,15 @@ EXAMPLE = ROOT / 'src/elengtis/examples/offline.yaml'
 
 
 class CampaignCliTests(unittest.TestCase):
+    def test_top_level_help_lists_commands(self):
+        for flag in ('-h', '--help'):
+            with self.subTest(flag=flag):
+                proc = subprocess.run([sys.executable, '-m', 'elengtis', flag],
+                                      capture_output=True, text=True, timeout=20)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn('{validate,preflight,schema,analyze,run,example}', proc.stdout)
+                self.assertNotIn('usage: elengtis run', proc.stdout)
+
     def test_model_free_campaign_runs_actions_without_constructing_an_agent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
