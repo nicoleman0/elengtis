@@ -30,6 +30,7 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/nicoleman0/elengtis"
 Issues = "https://github.com/nicoleman0/elengtis/issues"
+Changelog = "https://github.com/nicoleman0/elengtis/blob/release/0.1/CHANGELOG.md"
 
 [project.scripts]
 elengtis = "elengtis.cli:main"

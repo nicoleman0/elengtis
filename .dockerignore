@@ -1,0 +1,8 @@
+.git/
+.github/
+.venv/
+__pycache__/
+*.pyc
+results/
+.env
+experiments/live-comparison/results/

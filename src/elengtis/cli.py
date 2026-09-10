@@ -319,7 +319,7 @@ async def preflight(bundle):
 def main():
     parser, args = build_parser(), None
     argv = sys.argv[1:]
-    if argv and argv[0].startswith('-'):
+    if argv and argv[0].startswith('-') and argv[0] not in {'-h', '--help'}:
         argv.insert(0, 'run')
     args = parser.parse_args(argv)
     try:
