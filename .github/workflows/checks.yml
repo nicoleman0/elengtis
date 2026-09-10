@@ -56,3 +56,22 @@ jobs:
         run: |
           docker build --pull=false -t elengtis/dbhub:1.2.3 experiments/real-targets/dbhub
           timeout --signal=TERM --kill-after=30s 5m uv run python tests/docker_dbhub_smoke.py
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: elengtis:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Exercise the installed CLI and Docker client
+        run: |
+          docker run --rm elengtis:ci --help | grep -q '{validate,preflight,schema,analyze,run,example}'
+          docker run --rm elengtis:ci example --out /tmp/results | grep -q 'completed: 1/1'
+          docker run --rm --entrypoint docker elengtis:ci --version

@@ -1,6 +1,9 @@
 # elengtis
 
 [![checks](https://github.com/nicoleman0/elengtis/actions/workflows/checks.yml/badge.svg)](https://github.com/nicoleman0/elengtis/actions/workflows/checks.yml)
+[![PyPI](https://img.shields.io/pypi/v/elengtis)](https://pypi.org/project/elengtis/)
+[![Python versions](https://img.shields.io/pypi/pyversions/elengtis)](https://pypi.org/project/elengtis/)
+[![Container image](https://img.shields.io/badge/ghcr.io-elengtis-blue?logo=docker&logoColor=white)](https://github.com/nicoleman0/elengtis/pkgs/container/elengtis)
 
 A configurable MCP prompt-injection benchmark. Elengtis runs declarative YAML
 scenarios against stdio or Streamable HTTP MCP targets, records complete agent
@@ -48,6 +51,18 @@ uv run --offline python -m unittest discover -s tests -v
 
 The packaged example needs no API key, network service or Docker. It uses a
 trusted synthetic stdio fixture and a unique fictional canary for every trial.
+
+The same CLI is published as a non-root container image:
+
+```sh
+docker run --rm ghcr.io/nicoleman0/elengtis:0.1.0 --help
+docker run --rm ghcr.io/nicoleman0/elengtis:0.1.0 example --out /tmp/results
+```
+
+The image includes the Docker client for isolated-container campaigns. Using
+that transport from inside the image additionally requires an explicitly
+mounted Docker socket and matching group access; treat access to the socket as
+host-root equivalent.
 
 ## Campaigns
 
