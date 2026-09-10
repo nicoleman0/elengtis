@@ -3,7 +3,6 @@
 .venv/
 __pycache__/
 *.pyc
-dist/
 results/
 .env
 experiments/live-comparison/results/
