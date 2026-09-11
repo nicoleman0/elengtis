@@ -65,8 +65,9 @@ async def main():
             assert checked.records[0]['response']['rows'] == [{'status': 'open'}]
         metadata.append(client._elengtis_target_metadata)
 
-    assert len({item['container_id'] for item in metadata}) == 3
-    assert len({item['network']['name'] for item in metadata}) == 3
+    expected_targets = len(bundle.scenarios) + 1  # One separate target verifies reset.
+    assert len({item['container_id'] for item in metadata}) == expected_targets
+    assert len({item['network']['name'] for item in metadata}) == expected_targets
     assert len({item['image_id'] for item in metadata}) == 1
     assert all(item['reset_asserted'] and item['cleanup']['ok'] for item in metadata)
 
