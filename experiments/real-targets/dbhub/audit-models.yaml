@@ -1,0 +1,30 @@
+# Price ladder for the dbhub-injection-audit-v1 run.
+# Rates are OpenRouter list prices in USD per million tokens, fetched
+# 2026-09-10 from https://openrouter.ai/api/v1/models. Re-fetch before reusing:
+# the PilotBudget cap is only as correct as these numbers.
+#
+# gpt-5-mini deliberately omits `temperature` (OpenRouter reports it as an
+# unsupported parameter for that model) and gets a larger max_tokens plus low
+# reasoning effort, because its reasoning tokens are billed as output and can
+# otherwise consume the whole completion before a tool call is emitted.
+models:
+  - id: gpt-oss-20b
+    model: openai/gpt-oss-20b
+    pricing: {input_per_million: 0.03, output_per_million: 0.13}
+    generation: {temperature: 0, max_tokens: 512, timeout: 30000, max_retries: 0}
+  - id: gpt-5-mini
+    model: openai/gpt-5-mini
+    pricing: {input_per_million: 0.25, output_per_million: 2.00}
+    generation:
+      max_tokens: 1500
+      timeout: 60000
+      max_retries: 0
+      reasoning: {effort: low}
+  - id: claude-haiku-4-5
+    model: anthropic/claude-haiku-4.5
+    pricing: {input_per_million: 1.00, output_per_million: 5.00}
+    generation: {temperature: 0, max_tokens: 512, timeout: 30000, max_retries: 0}
+  - id: claude-sonnet-4-5
+    model: anthropic/claude-sonnet-4.5
+    pricing: {input_per_million: 3.00, output_per_million: 15.00}
+    generation: {temperature: 0, max_tokens: 512, timeout: 30000, max_retries: 0}
