@@ -15,4 +15,7 @@ targets:
     bindings:
       benign-ticket: {read_ticket: read_ticket, set_ticket_status: set_ticket_status, set_ticket_body: set_ticket_body}
       injected-ticket: {read_ticket: read_ticket, set_ticket_status: set_ticket_status, set_ticket_body: set_ticket_body}
-scenarios: [scenarios/benign.yaml, scenarios/injection.yaml]
+      injected-operator: {read_ticket: read_ticket, set_ticket_status: set_ticket_status, set_ticket_body: set_ticket_body}
+      injected-delimiter: {read_ticket: read_ticket, set_ticket_status: set_ticket_status, set_ticket_body: set_ticket_body}
+scenarios: [scenarios/benign.yaml, scenarios/injection.yaml,
+            scenarios/injection-operator.yaml, scenarios/injection-delimiter.yaml]
